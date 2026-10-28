@@ -15,7 +15,7 @@ const timestamp = '2026-09-20T08:30:00.000Z';
 function presetStatusFixture(preset) {
   return {
     preset,
-    label: preset === 'qq-chat' ? '一代仿真（reserved）' : '二代仿真（reserved2）',
+    label: preset === 'qq-chat' ? '聊天（qq-chat）' : '二代仿真（reserved2）',
     sourceFile: `dsh/agent-presets/${preset}/agent.cordis.yml`,
     installed: true,
     requiresRestart: true,
@@ -299,25 +299,14 @@ export function makeFixtureState() {
     },
     roleInjectMax: 8000,
     dshEffort: 'max',
+    dshProvider: 'deepseek-official',
+    dshModel: 'deepseek-flash',
     whitelist: { allow: { groups: [123456789, 100003], private: [100001] }, deny: { groups: [], private: [] }, ownerQQ: '100001' },
     sessions: [
       { key: 'group:123456789', sessionId: 'demo-community-20260920', owner: false },
       { key: 'group:100003', sessionId: 'demo-development-20260920', owner: false },
       { key: 'private:100001', sessionId: 'demo-owner-20260920', owner: true },
     ],
-    social: {
-      triggerProbability: 0.2, activeCheckMinMs: 10000, activeCheckMaxMs: 30000,
-      activeReplyDelayMinMs: 1000, activeReplyDelayMaxMs: 3000, activeDurationEnabled: true,
-      activeDurationMinMs: 180000, activeDurationMaxMs: 600000, idleWindowMs: 300000,
-      idleRetryProbability: 0.4, idleRetryWaitMs: 120000, skipProbability: 0.15,
-      surrenderProbability: 0.08, contextWindow: 20, maxReplyChars: 500,
-      burstEnabled: true, burstIntervalMinMs: 1000, burstIntervalMaxMs: 3000,
-      longGapProbability: 0.1, longGapMinMs: 2500, longGapMaxMs: 5000,
-      mustReplyKeywords: ['小鲸鱼', 'DeepSeek'], proactiveEnabled: true,
-      proactiveIdleThresholdMs: 1800000, proactiveCheckMinMs: 300000,
-      proactiveCheckMaxMs: 900000, proactiveProbability: 0.2,
-    },
-    socialStates: { 'group:123456789': { phase: 'active' }, 'group:100003': { phase: 'idle' } },
     v2: { enabled: true, agentPreset: 'qq-chat-v2', provideRecommendations: true, tools: {} },
     // 会话初始提示词（离线示例）：整段内容都是虚构的演示文本。
     initPrompt: '离线示例：这是一个演示用的群聊环境说明，不会写进任何真实配置。',
@@ -436,20 +425,28 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             return json({ ok: true, backups: [{ file: `${preset}.agent.cordis.yml.fixture`, mtime: Date.parse(timestamp) }] });
           }
           case '/api/dsh/model': return json({
-            provider: 'deepseek-official',
-            model: 'deepseek-flash',
+            provider: state.dshProvider,
+            model: state.dshModel,
             reasoningEffort: state.dshEffort,
             options: ['low', 'high', 'max'],
             labels: { low: { name: 'Low', description: 'routine' }, high: { name: 'High', description: 'default balance' }, max: { name: 'Max', description: 'hardest tasks' } },
             default: 'max',
             providerDefault: 'high',
             catalogSource: 'dsh',
+            catalog: [
+              { id: 'deepseek-official', name: 'DeepSeek', models: [
+                { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }, { id: 'max', name: 'Max' }], defaultEffort: 'high' } },
+                { id: 'deepseek-pro', name: 'DeepSeek V4.1 Pro', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'high' } },
+              ] },
+              { id: 'my-relay', name: 'My Relay', models: [
+                { id: 'relay-large', name: 'Relay Large', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } },
+              ] },
+            ],
             globalSideEffect: true,
           });
           case '/api/whitelist': return json(state.whitelist);
           case '/api/sessions': return json({ sessions: state.sessions });
           case '/api/pending': return json({ pending: [{ key: 'group:123456789', kind: 'approval', toolName: '演示工具', reason: '等待管理员确认（离线示例）' }] });
-          case '/api/social': return json({ config: state.social, states: state.socialStates, pendingSummaries: { 'group:123456789': 2 } });
           case '/api/socialV2/config': return json({ ok: true, config: state.v2 });
           case '/api/socialV2/activity': return json({ ok: true, paused: state.paused });
           case '/api/socialV2/tool-log': return json({ ok: true, entries: state.toolLog });
@@ -541,11 +538,13 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             const preset = body.preset === 'qq-chat' ? 'qq-chat' : 'qq-chat-v2';
             return json({ ok: true, restoredFrom: `${preset}.agent.cordis.yml.fixture`, requiresRestart: true });
           }
+          case '/api/dsh/model':
+            state.dshProvider = body.provider;
+            state.dshModel = body.model;
+            return json({ ok: true, provider: body.provider, model: body.model, reasoningEffort: state.dshEffort, verified: true });
           case '/api/dsh/effort': state.dshEffort = body.reasoningEffort; return json({ ok: true, reasoningEffort: body.reasoningEffort });
           case '/api/role-mode': state.roleMode = body.mode; return json({ ok: true });
           case '/api/whitelist': state.whitelist = body; return json({ ok: true });
-          case '/api/social': state.social = body; return json({ ok: true });
-          case '/api/social/state': state.socialStates[body.key] = { phase: body.phase }; return json({ ok: true });
           case '/api/socialV2/config': state.v2 = body; return json({ ok: true });
           case '/api/socialV2/activity': state.paused = body.paused; return json({ ok: true });
           case '/api/socialV2/tool-log/clear': state.toolLog = []; return json({ ok: true });
@@ -589,7 +588,6 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             else state.slang.forEach(x => { if (ids.includes(x.id)) x.status = path.endsWith('confirm') ? 'confirmed' : 'rejected'; });
             return json({ ok: true, count: ids.length, confirmed: ids.length, rejected: ids.length, deleted: ids.length });
           }
-          case '/api/social/flush':
           case '/api/socialV2/wake':
           case '/api/socialV2/memory-clear':
           case '/api/socialV2/memory-update':

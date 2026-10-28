@@ -66,7 +66,7 @@ test('Config 是可用的 schemastery schema，且带 volatile 字段', () => {
 });
 
 test('schema 接受全部规范/历史 mode 拼写，拒绝非法值', () => {
-  for (const mode of ['chat', 'closed-agent', 'reserved', 'reserved2', 'simulation']) {
+  for (const mode of ['chat', 'closed-agent', 'reserved2', 'simulation']) {
     assert.equal(mod.Config({ mode }).mode, mode, `${mode} 应被接受`);
   }
   assert.throws(() => mod.Config({ mode: 'bogus' }), '非法 mode 必须被拒绝');

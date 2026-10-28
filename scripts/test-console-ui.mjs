@@ -14,7 +14,7 @@ const args = process.argv.slice(2);
 const original = args.includes('--original');
 const record = args.includes('--record-baseline');
 const artifacts = args.find(x => x.startsWith('--artifacts='))?.slice('--artifacts='.length);
-const views = ['overview', 'sessions', 'persona', 'social-v2', 'social-v1', 'slang', 'usage', 'access', 'operations', 'reference'];
+const views = ['overview', 'sessions', 'persona', 'social-v2', 'slang', 'usage', 'access', 'operations', 'reference'];
 const legacyIds = JSON.parse((await readFile(join(here, 'console-ui-legacy-ids.json'), 'utf8')).replace(/^\uFEFF/, ''));
 const baselinePath = join(here, 'console-ui-contracts.json');
 if (record && !original) throw new Error('--record-baseline requires --original; only the pre-redesign console can define the baseline.');
@@ -93,21 +93,21 @@ try {
     return fixture.requests.at(-1)?.body;
   }
 
-  await test('All 225 legacy IDs remain present and every DOM ID is unique', async () => {
+  await test('All 191 remaining legacy IDs remain present and every DOM ID is unique', async () => {
     const ids = await page.locator('[id]').evaluateAll(nodes => nodes.map(x => x.id));
-    assert.equal(legacyIds.length, 225);
+    assert.equal(legacyIds.length, 191);
     assert.deepEqual(legacyIds.filter(x => !ids.includes(x)), []);
     assert.equal(new Set(ids).size, ids.length, 'Duplicate DOM IDs detected');
   });
 
-  if (!original) await test('All ten navigation destinations work and preserve unsaved form values across polling', async () => {
+  if (!original) await test('All nine navigation destinations work and preserve unsaved form values across polling', async () => {
     for (const view of views) {
       await navigate(view);
       const visiblePages = await page.locator('[data-page]').evaluateAll(nodes => nodes.filter(x => x.getClientRects().length && getComputedStyle(x).visibility !== 'hidden').map(x => x.dataset.page));
       assert(visiblePages.length > 0, `${view} has no visible content`);
       assert(visiblePages.every(x => x === view), `${view} exposes another page: ${visiblePages.join(', ')}`);
     }
-    const drafts = { wlGroups: '100001, 100002', roleInput: '未保存的角色', v2AgentPreset: 'draft-preset', sKeywords: '未保存关键词', slangMeaning: '未保存的含义', tsMsg: '未发送的测试消息' };
+    const drafts = { wlGroups: '100001, 100002', roleInput: '未保存的角色', v2AgentPreset: 'draft-preset', slangMeaning: '未保存的含义', tsMsg: '未发送的测试消息' };
     for (const [id, value] of Object.entries(drafts)) await fill(id, value);
     await navigate('overview');
     await page.waitForTimeout(3300); // Exercise the real 3-second status polling interval.
@@ -118,7 +118,7 @@ try {
   });
 
   await test('Mode and preset contracts', async () => {
-    for (const mode of ['chat', 'reserved', 'reserved2', 'closed-agent']) {
+    for (const mode of ['chat', 'reserved2', 'closed-agent']) {
       assert.deepEqual(await clickWrite(`#modeRow [data-mode="${mode}"]`, '/api/mode'), { mode, closedAgentPreset: '' });
     }
     const select = await reveal('#closedPreset');
@@ -199,19 +199,6 @@ try {
     assert.deepEqual(await clickWrite('#v2ResumeBtn', '/api/socialV2/activity'), { paused: false });
   });
 
-  await test('First-generation social parameter and phase contracts', async () => {
-    await fill('sTrigger', 0.35);
-    await fill('sCheckMin', 12);
-    await fill('sKeywords', '鲸鱼，测试');
-    const body = await clickWrite('#socialSave', '/api/social');
-    assert.equal(body.triggerProbability, 0.35);
-    assert.equal(body.activeCheckMinMs, 12000);
-    assert.deepEqual(body.mustReplyKeywords, ['鲸鱼', '测试']);
-    await (await reveal('#sStateKey')).selectOption('group:123456789');
-    assert.deepEqual(await clickWrite('#sStateIdle', '/api/social/state'), { key: 'group:123456789', phase: 'idle' });
-    assert.deepEqual(await clickWrite('#socialFlush', '/api/social/flush'), {});
-  });
-
   await test('Slang add, search, confirm modal, tab switching and parameter contracts', async () => {
     for (const [id, value] of Object.entries({ slangContent: '测试词条', slangMeaning: '很棒', slangUsage: '赞美', slangExample: '这个效果很棒。' })) await fill(id, value);
     assert.deepEqual(await clickWrite('#slangAdd', '/api/slang'), { content: '测试词条', meaning: '很棒', usage: '赞美', example: '这个效果很棒。' });
@@ -250,7 +237,9 @@ try {
     console.log(`Recorded original API contracts: ${baselinePath}`);
   } else await test('All submitted payloads exactly match the pre-redesign console baseline', async () => {
     const expected = JSON.parse(await readFile(baselinePath, 'utf8'));
-    assert.deepEqual(fixture.requests, expected);
+    // 「重新检测 state 权限」是测试主动触发的运维动作，不属于表单写载荷契约（见上方用例注释）。
+    const actual = fixture.requests.filter(r => !(r.path === '/api/security' && r.body?.rehardenStateDir === true));
+    assert.deepEqual(actual, expected);
   });
 
   if (!original) await test('Token usage panel renders totals, per-conversation and per-turn cost', async () => {
@@ -505,7 +494,7 @@ try {
     await page.waitForFunction((prev) => document.getElementById('simPromptText').value !== prev, v2);
     const v1 = await page.locator('#simPromptText').inputValue();
     assert.notEqual(v1, v2, '两代预设的提示词应各自独立');
-    assert.match(await page.locator('#simPromptStatus').textContent(), /一代仿真|qq-chat/);
+    assert.match(await page.locator('#simPromptStatus').textContent(), /聊天|qq-chat/);
     // 切回二代，避免影响后续断言
     await page.locator('#simPromptPreset').selectOption('qq-chat-v2');
     await page.waitForFunction((prev) => document.getElementById('simPromptText').value === prev, v2);
@@ -528,6 +517,23 @@ try {
     await page.locator('#roleInjectMax').fill('6000');
     await page.locator('#roleInjectMaxSave').click();
     await page.waitForFunction(() => document.getElementById('roleInjectMaxMsg').textContent.includes('6000'));
+  });
+
+  if (!original) await test('DSH 模型列表来自 session/modelCatalog，可手动切换提供方/模型并明示全局副作用', async () => {
+    await navigate('overview');
+    await page.waitForFunction(() => document.getElementById('dshProviderSelect').options.length > 0);
+    const providers = await page.locator('#dshProviderSelect option').evaluateAll((nodes) => nodes.map((n) => n.value));
+    assert.deepEqual(providers, ['deepseek-official', 'my-relay'], `提供方应来自 DSH 目录，实际 ${providers.join(',')}`);
+    assert.equal(await page.locator('#dshProviderSelect').inputValue(), 'deepseek-official');
+    const models = await page.locator('#dshModelSelect option').evaluateAll((nodes) => nodes.map((n) => n.value));
+    assert.deepEqual(models, ['deepseek-flash', 'deepseek-pro'], `模型应来自 DSH 目录，实际 ${models.join(',')}`);
+    assert.equal(await page.locator('#dshModelSelect').inputValue(), 'deepseek-flash');
+    // 切换提供方后模型下拉应刷新为该提供方的模型（不发起写请求，保持 baseline 稳定）
+    await page.locator('#dshProviderSelect').selectOption('my-relay');
+    await page.waitForFunction(() => document.getElementById('dshModelSelect').value === 'relay-large');
+    await page.locator('#dshProviderSelect').selectOption('deepseek-official');
+    await page.waitForFunction(() => document.getElementById('dshModelSelect').value === 'deepseek-flash');
+    assert.match(await page.locator('#dshModelNote').textContent(), /全局默认/, '必须说明切换模型会改 DSH 全局默认');
   });
 
   if (!original) await test('思考强度：档位来自 DSH、默认 max、可切换并明示全局副作用', async () => {

@@ -40,7 +40,7 @@
  */
 
 /** Simulation is the safe default: no local tools, whitelist-gated. */
-const SIMULATION_MODES = Object.freeze(['chat', 'reserved', 'reserved2']);
+const SIMULATION_MODES = Object.freeze(['chat', 'reserved2']);
 
 /**
  * Accepted mode spellings.
@@ -54,7 +54,6 @@ const SIMULATION_MODES = Object.freeze(['chat', 'reserved', 'reserved2']);
 const MODE_ALIASES = Object.freeze({
   simulation: 'simulation',
   chat: 'chat',
-  reserved: 'reserved',
   reserved2: 'reserved2',
   'closed-agent': 'closed-agent',
 });
@@ -81,7 +80,6 @@ const ALL_MODES = Object.freeze([...SIMULATION_MODES, 'simulation', 'closed-agen
  */
 const DEFAULT_MODE_PRESETS = Object.freeze({
   chat: Object.freeze(['qq-chat']),
-  reserved: Object.freeze(['qq-chat']),
   reserved2: Object.freeze(['qq-chat-v2']),
   // `simulation` is the canonical spelling of `reserved2`. It leads with the
   // canonical preset names; `qq-chat-v2` stays accepted because that is the
@@ -112,7 +110,6 @@ function buildModePresets(overrides = {}) {
 /** Legacy mode -> canonical QSH mode (ADR 0003 / QSH_PLAN.md §2.1). */
 export const LEGACY_TO_CANONICAL = Object.freeze({
   chat: 'simulation',
-  reserved: 'simulation',
   reserved2: 'simulation',
   'closed-agent': 'closed-agent',
   simulation: 'simulation',

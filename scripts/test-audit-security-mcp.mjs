@@ -242,7 +242,26 @@ test('legacy read tools are not registered at all outside closed-agent', async (
   assert.equal(closed.has('qq_list_groups'), true, 'closed-agent 下旧只读工具必须存在');
 });
 
-// 拒绝时绝不能把 config.json 的群白名单回吐给模型。
+// 补全后的全量 API 工具：qq_api 必须真的打到 OneBot，qq_api_help 必须能列出目录。
+// 离线回归里目录文件不可达，会走 FALLBACK_API_ACTIONS（至少含 get_login_info）。
+test('qq_api calls SnowLuma directly and qq_api_help exposes the catalogue', async () => {
+  const seen = [];
+  const callTool = loadSnowlumaTools(async (url, init = {}) => {
+    seen.push({ url: String(url), body: JSON.parse(init.body || '{}') });
+    return Response.json({ status: 'ok', retcode: 0, data: { user_id: 10001, nickname: 'fixture' } });
+  });
+  const help = await callTool('qq_api_help', { action: 'get_login_info' });
+  assert.notEqual(help.isError, true);
+  assert.match(help.content[0].text, /get_login_info/);
+  const result = await callTool('qq_api', { action: 'get_login_info', params: {} });
+  assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].url, /\/get_login_info$/);
+  assert.deepEqual(seen[0].body, {});
+  await assert.rejects(callTool('qq_api', { action: 'not_a_real_action', params: {} }), '未知 action 必须被 schema 拒绝');
+});
+
+
 // 覆盖两条路：v2 群成员工具（桥接 403）与旧只读历史工具（closed-agent 下才注册）。
 test('denied group reads never reveal the group allowlist', async () => {
   const fixtureConfig = { allow: { groups: ['111111', '222222'] } };

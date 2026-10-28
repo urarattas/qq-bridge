@@ -44,12 +44,13 @@ await test('#22 refreshMode 采纳控制台刚写入的 user 层（否则 5 秒�
     await h.refreshMode();
     assert.equal(h.getMode(), 'chat', '必须读 user 层，而不是未热更新的 value');
 
-    // 老行为兜底：从没在控制台写过（user 为空）时仍读 value。
+    // 老行为兜底：从没在控制台写过（user 为空）时仍读 value；
+    // 已删除的一代 `reserved` 会迁移到 `reserved2`，不能把桥接留在不存在的模式上。
     h.api.settings.describe = async () => ({
       result: { ok: true, value: { namespaces: [{ ns: 'qq-mode', value: { mode: 'reserved' }, user: {} }] } }
     });
     await h.refreshMode();
-    assert.equal(h.getMode(), 'reserved');
+    assert.equal(h.getMode(), 'reserved2');
 
     // ownerQQ：user 层空串表示「不覆盖 config.json」。
     h.cfg.ownerQQ = 20002;

@@ -47,6 +47,69 @@ await test('queued send rechecks allowlist at actual transport time', async (h) 
   await sending;
   assert.equal(h.calls.sent.length, 0);
 });
+await test('本地 /help 不投递 DSH，指令与回复都不进入二代消息流', async (h) => {
+  h.setMode('reserved2');
+  const event = {
+    self_id: 999, user_id: 456, group_id: 456, message_id: 1001,
+    sender: { user_id: 456, nickname: '群友' },
+    message: [{ type: 'text', data: { text: '/help' } }]
+  };
+  await h.handleIncoming('group', 456, event, h.cfg);
+  assert.equal(h.calls.prompts.length, 0, '/help 不得投递 DSH');
+  assert.ok(h.calls.sent.some((m) => m.kind === 'group' && String(m.text).includes('/help')), '应本地回复帮助');
+  const st = h.getSocialV2State('group:456');
+  assert.equal(st.unread.length, 0, '指令不能进入二代未读');
+  assert.equal(st.recentMessages.length, 0, '指令不能进入二代最近消息');
+});
+await test('群友 /status 被本地拒绝，管理员 /status 本地回复且不投递 DSH', async (h) => {
+  h.setMode('reserved2');
+  const makeEvent = (userId, text) => ({
+    self_id: 999, user_id: userId, group_id: 456, message_id: 1002 + userId,
+    sender: { user_id: userId, nickname: String(userId) },
+    message: [{ type: 'text', data: { text } }]
+  });
+  await h.handleIncoming('group', 456, makeEvent(456, '/status'), h.cfg);
+  assert.ok(h.calls.sent.some((m) => String(m.text).includes('仅管理员')), '群友应收到仅管理员提示');
+  h.calls.sent.length = 0;
+  await h.handleIncoming('group', 456, makeEvent(123, '/status'), h.cfg);
+  assert.equal(h.calls.prompts.length, 0, '管理员 /status 也不得投递 DSH');
+  assert.ok(h.calls.sent.some((m) => String(m.text).includes('会话') && String(m.text).includes('模式')), '管理员应收到本地状态');
+  const st = h.getSocialV2State('group:456');
+  assert.equal(st.unread.length, 0, '指令与回复都不能进入二代未读');
+  assert.equal(st.recentMessages.length, 0, '指令与回复都不能进入二代最近消息');
+});
+await test('控制台模型切换只接受 DSH 目录中的组合，并热更新会话模型', async (h) => {
+  h.api.callUnary = async (method) => {
+    if (method === 'session.modelCatalog') {
+      return { result: { ok: true, value: { groups: [{ id: 'my-relay', models: [{ id: 'relay-large', reasoning: { efforts: [{ id: 'high' }], defaultEffort: 'high' } }] }] } } };
+    }
+    return { result: { ok: true, value: {} } };
+  };
+  h.cfg.dsh = { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' };
+  const server = h.startConsoleServer();
+  if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+  const post = (body) => new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: server.address().port, path: '/api/dsh/model?token=fixture-console-token', method: 'POST', headers: { 'content-type': 'application/json' } }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') }));
+    });
+    request.on('error', reject);
+    request.setTimeout(3000, () => request.destroy(new Error('model request hung')));
+    request.end(JSON.stringify(body));
+  });
+  try {
+    const ok = await post({ provider: 'my-relay', model: 'relay-large' });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.model, 'relay-large');
+    assert.equal(h.cfg.dsh.provider, 'my-relay');
+    assert.equal(h.cfg.dsh.model, 'relay-large');
+    assert.equal(h.cfg.dsh.reasoningEffort, 'high', '不兼容的思考强度应回退到该模型默认档');
+    const bad = await post({ provider: 'my-relay', model: 'not-in-catalog' });
+    assert.equal(bad.status, 400);
+    assert.match(bad.body.error, /my-relay/);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
 await test('old prompt completion cannot delete replacement queue after reset', async (h) => {
   const release = [];
   h.api.sessions.prompt = async () => {

@@ -219,8 +219,8 @@ test('removing owner override returns only owner to simulation', () => {
   assert.equal(router.policyFingerprint('group:8'), groupBefore);
 });
 
-test('legacy chat, reserved, and reserved2 migrate explicitly with audit events', () => {
-  for (const mode of ['chat', 'reserved', 'reserved2']) {
+test('legacy chat and reserved2 migrate explicitly with audit events', () => {
+  for (const mode of ['chat', 'reserved2']) {
     const { state, events } = migrateLegacyMode({ mode, ownerQQ });
     const router = new SessionRouter({ ownerQQ, state });
     assert.equal(router.modeFor(ownerKey), 'simulation');

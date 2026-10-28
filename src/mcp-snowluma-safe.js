@@ -35,6 +35,43 @@ function loadConfig() {
 
 const cfg = loadConfig();
 
+// ── SnowLuma 全量 API 目录 ───────────────────────────────────────────────────
+//
+// 目录由仓库根目录的 `_snowluma-catalog.json` 提供（与
+// https://snowluma.github.io/zh/docs/api 对账后的 190 个 OneBot v11 动作）。
+// 这里做成**一个** `qq_api` 工具而不是 190 个独立工具：每个工具的描述 + schema
+// 都会随 system prompt 在每一次请求里重发，190 个工具会额外吃掉数万 token，
+// 且远超模型实际能稳定选择的工具数量。单个工具 + action 枚举既完整暴露全部动作，
+// 又只增加一份 schema 成本。
+//
+// 离线回归会用 vm 把本文件加载到没有仓库根目录的沙箱里，因此目录读取失败时必须
+// 回退到一个可用的小集合，而不是让 `z.enum([])` 在模块加载期直接抛错。
+const FALLBACK_API_ACTIONS = Object.freeze([
+  'get_login_info', 'get_status', 'get_version_info', 'get_group_list', 'get_group_info',
+  'get_group_member_list', 'get_group_member_info', 'get_group_msg_history', 'get_msg',
+  'get_friend_list', 'get_stranger_info', 'get_forward_msg', 'send_msg', 'send_group_msg',
+  'send_private_msg', 'delete_msg', 'set_group_ban', 'set_group_kick', 'set_group_card'
+]);
+const snowlumaCatalog = (() => {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(ROOT, '_snowluma-catalog.json'), 'utf8'));
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((item) => item && typeof item.name === 'string' && item.name.trim())
+        .map((item) => ({
+          name: item.name.trim(),
+          readOnly: item.readOnly === true,
+          summary: typeof item.summary === 'string' ? item.summary : '',
+          params: Array.isArray(item.params) ? item.params.map(String) : []
+        }));
+    }
+  } catch {}
+  return FALLBACK_API_ACTIONS.map((name) => ({ name, readOnly: false, summary: '', params: [] }));
+})();
+const snowlumaApiActions = snowlumaCatalog.map((item) => item.name);
+const snowlumaApiByName = new Map(snowlumaCatalog.map((item) => [item.name, item]));
+const QQ_API_MAX_OUTPUT_CHARS = 200000;
+
 function getConfig() {
   return loadConfig();
 }
@@ -84,13 +121,14 @@ function unquoteJsonString(value) {
 // CQ 转义，见 bridge.js 的 onebotSend），属于"看起来在防护、实际是死代码"的假安全。
 // 这里直接删除，避免以后有人以为 MCP 侧还有一道 CQ 转义而放松桥接那一层。
 
-async function onebot(action, params = {}) {
+async function onebot(action, params = {}, options = {}) {
   const { httpUrl, token } = getOneBotConfig();
+  const timeoutMs = Math.min(120000, Math.max(1000, Number(options.timeoutMs) || 15000));
   const res = await fetch(`${httpUrl}/${action}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(params),
-    signal: AbortSignal.timeout(15000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
   if (!res.ok) {
     const hint = res.status === 426 ? '；HTTP 426 通常表示 httpUrl 指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址' : '';
@@ -374,6 +412,68 @@ server.tool(
     }
   }
 );
+
+// ── SnowLuma 全量 API 直连 ─────────────────────────────────────────────────
+//
+// ⚠️ 这个工具把 SnowLuma 文档里的**全部** OneBot v11 动作暴露给 agent，包含禁言、
+// 踢人、撤回、改群资料、上传/下载文件、QQ 空间、凭据读取等管理/敏感动作。它默认开启，
+// 因为管理员明确要求「全部 190 个 API 直接暴露」；如果只想保留安全子集，把
+// config.json 的 `snowluma.mcp.rawApi` 设为 false（或在控制台关闭）即可整体下线它。
+// 具体有哪些 action、每个 action 需要哪些参数，用 `qq_api_help` 查，不要凭记忆猜参数名。
+if (cfg.snowluma?.mcp?.rawApi !== false) {
+  server.tool(
+    'qq_api',
+    '调用 SnowLuma 的任意 OneBot v11 API（全量 190 个动作）。action 必须是 SnowLuma 文档中的动作名；params 是该动作的参数对象（键名与 OneBot 一致，例如 group_id / user_id / message_id / duration）。调用前先用 qq_api_help 查参数名与说明，不要猜。注意：qq_api 直接打 SnowLuma HTTP API，不走桥接的发送白名单与敏感信息审计；禁言/踢人/撤回/改群资料/文件/QQ 空间等管理动作会真实影响 QQ 账号，非管理员明确要求时不要调用。普通聊天发言仍优先用 qq_send_message / qq_reply 等专用工具。',
+    {
+      action: z.enum(snowlumaApiActions).describe('SnowLuma OneBot v11 API 动作名（全量目录见 qq_api_help）'),
+      params: z.record(z.string(), z.any()).optional().describe('动作参数对象；键名用 OneBot 原始参数名。没有参数的动作省略或传 {}'),
+      timeoutMs: z.number().optional().describe('HTTP 超时毫秒数，默认 15000，最大 120000（下载/转码类动作可调大）')
+    },
+    async ({ action, params, timeoutMs }) => {
+      try {
+        const entry = snowlumaApiByName.get(action);
+        if (!entry) {
+          return { content: [{ type: 'text', text: `未知 action：${action}。请用 qq_api_help 查看可用动作。` }], isError: true };
+        }
+        const args = params && typeof params === 'object' && !Array.isArray(params) ? params : {};
+        if (entry.readOnly !== true) {
+          console.error(`[snowluma-safe] qq_api 写动作 ${action} ${JSON.stringify(args).slice(0, 300)}`);
+        }
+        const data = await onebot(action, args, { timeoutMs });
+        let text = typeof data === 'string' ? data : serializeModelData(data);
+        if (text.length > QQ_API_MAX_OUTPUT_CHARS) {
+          text = text.slice(0, QQ_API_MAX_OUTPUT_CHARS) + `\n…（结果过长，已截断到 ${QQ_API_MAX_OUTPUT_CHARS} 字符；请用更精确的参数缩小范围）`;
+        }
+        return { content: [{ type: 'text', text }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `${action} 调用失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'qq_api_help',
+    '查询 SnowLuma 全量 API 目录（只读）：动作名、是否只读、说明、参数名。不传参数返回全部；可用 query 按动作名/说明搜索，或用 action 精确查一个动作。',
+    {
+      query: z.string().optional().describe('按动作名或说明模糊搜索，例如 ban / 禁言 / history'),
+      action: z.string().optional().describe('精确查询某个动作名，例如 set_group_ban')
+    },
+    async ({ query, action }) => {
+      const q = String(query ?? '').trim().toLowerCase();
+      const exact = String(action ?? '').trim();
+      let list = snowlumaCatalog;
+      if (exact) list = list.filter((item) => item.name === exact);
+      if (q) {
+        list = list.filter((item) => item.name.toLowerCase().includes(q) || item.summary.toLowerCase().includes(q));
+      }
+      if (!list.length) {
+        return { content: [{ type: 'text', text: `没有匹配的 API 动作${exact ? `：${exact}` : q ? `：${q}` : ''}` }], isError: true };
+      }
+      const text = list.map((item) => `${item.name}${item.readOnly ? ' [只读]' : ''}：${item.summary || '（无说明）'}${item.params.length ? `；参数：${item.params.join(', ')}` : '；无参数'}`).join('\n');
+      return { content: [{ type: 'text', text: `共 ${list.length} 个动作：\n${text}` }] };
+    }
+  );
+}
 
 // ── 旧只读工具：**按启动时的桥接模式决定是否注册** ─────────────────────────
 //
