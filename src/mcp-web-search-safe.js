@@ -15,6 +15,7 @@
 //   - 响应体按字节流限量读取，避免超大响应拖垮进程。
 // - 搜索结果/抓取结果仅作为“候选解释”，最终是否入库仍由控制台人工确认。
 import path from 'node:path';
+import fs from 'node:fs';
 import { safeFetch } from './safe-fetch.js';
 import { webSearch } from './web-search.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -51,7 +52,19 @@ function sanitizeQuery(query) {
 
 const server = new McpServer({ name: 'web-search-safe', version: '0.2.1-r1' });
 
-server.tool(
+// 控制台「二代仿真 → 工具开关」里的 webSearch / webFetch：注册期就隐藏，
+// 省 token 也避免模型看到一个必然 403 的工具。只影响 reserved2。
+const webToolFlags = (() => {
+  const root = projectRoot();
+  let mode = '';
+  let tools = {};
+  try { mode = String(JSON.parse(fs.readFileSync(path.join(root, 'state', 'mode.json'), 'utf8'))?.mode ?? ''); } catch {}
+  try { tools = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8'))?.socialV2?.tools ?? {}; } catch {}
+  return { mode, tools };
+})();
+const webToolEnabled = (flag) => !(webToolFlags.mode === 'reserved2' && webToolFlags.tools?.[flag] === false);
+
+if (webToolEnabled('webSearch')) server.tool(
   'web_search',
   '只读联网搜索：优先使用与 DSH 相同的 DeepSeek 联网搜索（结果更准、不把群里的词发给搜索引擎广告网络），不可用时自动回退 Bing。返回标题/URL/摘要，不执行任何本地操作。适合查网络用语、梗、事实性问题和热点。',
   { query: z.string().describe('要搜索确认的网络用语/黑话/梗/事实性问题') },
@@ -72,7 +85,7 @@ server.tool(
   }
 );
 
-server.tool(
+if (webToolEnabled('webFetch')) server.tool(
   'web_fetch',
   '只读抓取 HTTP(S) 网页正文，返回纯文本/HTML 前 50000 字符。禁止访问内网/本机地址，不执行任何本地操作。',
   { url: z.string().describe('要抓取的 http(s) URL') },

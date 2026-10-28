@@ -1,6 +1,6 @@
 # QQ 桥接权限与安全规则（RULES）
 
-## 运行模式（QQ 桥接四模式）
+## 运行模式（QQ 桥接三模式）
 
 模式由**桥接控制台**（默认 `http://127.0.0.1:3100`）顶部的模式按钮切换，也可直接改 DSH 设置的 `qq-mode` 命名空间；
 控制台会**同时**写穿到 DSH 设置与本地 `qq-bridge/state/mode.json`，两者保持一致。
@@ -15,6 +15,22 @@
 | `reserved2`（二代仿真，运行 `setup-dsh.mjs` 后默认） | 暂同 chat | qq-chat-v2 | 文本不自动转发，AI 通过工具自主看消息/发言/等待/设置唤醒与潜水 |
 
 > 一代仿真（`reserved`）已删除。旧配置里的 `reserved` 会在读取时迁移为 `reserved2`，控制台不再提供该模式。
+
+### 工具开关（reserved2）
+
+控制台「二代仿真 → 工具开关」覆盖全部 MCP 工具：QQ 通用/发送工具、二代会话工具、`web_search`/`web_fetch`、`snowluma_status`。
+关闭后，桥接在 **DSH 重启后**不再向模型注册该工具（省 token）；QQ 工具在调用期也会拒绝，联网搜索/探活这类无桥接端点的工具则以下次注册期为准。
+`qq_list_groups` / `qq_get_group_history` 只在 closed-agent 注册，这两个开关会直接影响 closed-agent。`qq_api` / `qq_api_help` 另受 `snowluma.mcp.rawApi` 总闸控制。
+
+### lib 目录
+
+把第三方程序放到 `lib/<名称>/`，启动脚本命名为 `launcher.bat` / `launcher.cmd` / `launcher.exe`
+（也认 `launch.*`、`start.*`、`run.*` 以及与目录同名的脚本），桥接启动时扫描并自动拉起；
+没有就跳过，SnowLuma 网关已在线时不重复拉起。`.bat` / `.cmd` 使用 `wscript` 以隐藏窗口启动，
+不弹出额外 cmd 窗口；runner 看门狗监视桥接进程，**关闭 start.bat 窗口 / 桥接崩溃 / Ctrl+C 后
+1 秒内用 `taskkill /T /F` 结束这些程序及其全部子孙进程**。stdin 接 NUL（`pause` / `set /p` 不会卡住），
+输出写入 `state/logs/lib-<名称>.log`。`lib/` 会自动加入 PATH，`lib/ffmpeg.exe` 等单文件工具可直接按名字调用。
+`config.lib.autoLaunch: false` 可关闭自动拉起。桥接**不安装、不复制、不下载**这些程序，使用者需自行确保授权与来源可信。
 
 > ⚠️ `closed-agent` 模式下 owner 私聊 agent 拥有**完整本地工具**（DSH 默认 preset，通常是 `standard`），
 > 这是有意为之（QQ 远程操控 DSH）。该模式只放行 owner 私聊，群友完全无法触达；

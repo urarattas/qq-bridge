@@ -110,6 +110,61 @@ await test('控制台模型切换只接受 DSH 目录中的组合，并热更新
     assert.match(bad.body.error, /my-relay/);
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
+await test('二代工具开关覆盖全部 MCP 工具，并能在控制台保存', async (h) => {
+  const server = h.startConsoleServer();
+  if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+  const port = server.address().port;
+  const request = (path, method = 'GET', body = null) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: path + (path.includes('?') ? '&' : '?') + 'token=fixture-console-token', method, headers: body ? { 'content-type': 'application/json' } : {} }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.end(body ? JSON.stringify(body) : undefined);
+  });
+  try {
+    const first = JSON.parse((await request('/api/socialV2/config')).text);
+    for (const flag of ['status', 'rawApi', 'listGroups', 'groupHistory', 'getGroupMembers', 'webSearch', 'webFetch', 'hostStatus']) {
+      assert.equal(first.config.tools[flag], true, `${flag} 默认应为 true`);
+    }
+    const saved = JSON.parse((await request('/api/socialV2/config', 'POST', { tools: { rawApi: false, webSearch: false } })).text);
+    assert.equal(saved.ok, true);
+    const after = JSON.parse((await request('/api/socialV2/config')).text);
+    assert.equal(after.config.tools.rawApi, false);
+    assert.equal(after.config.tools.webSearch, false);
+    assert.equal(after.config.tools.status, true, '未提交的开关应保留默认值');
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
+await test('控制台语音合成写入语音库，试听端点可直接读取', async (h) => {
+  if (process.platform !== 'win32') { console.log('SKIP 非 Windows，无 SAPI'); return; }
+  const server = h.startConsoleServer();
+  if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+  const port = server.address().port;
+  const request = (path, method = 'GET', body = null) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: path + (path.includes('?') ? '&' : '?') + 'token=fixture-console-token', method, headers: body ? { 'content-type': 'application/json' } : {} }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, buffer: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.setTimeout(60000, () => req.destroy(new Error('tts request timed out')));
+    req.end(body ? JSON.stringify(body) : undefined);
+  });
+  try {
+    const engines = JSON.parse((await request('/api/voice/tts/engines')).buffer.toString('utf8'));
+    assert.equal(engines.ok, true);
+    assert.ok(engines.engines.some((engine) => engine.id === 'sapi'), '应检测到 Windows SAPI');
+    const synth = await request('/api/voice/tts', 'POST', { text: '语音合成回归测试。', engine: 'sapi' });
+    const body = JSON.parse(synth.buffer.toString('utf8'));
+    assert.equal(synth.status, 200, JSON.stringify(body));
+    assert.match(body.file, /\.wav$/);
+    const preview = await request('/api/voice/preview?file=' + encodeURIComponent(body.file));
+    assert.equal(preview.status, 200);
+    assert.match(String(preview.headers['content-type']), /^audio\//);
+    assert.ok(preview.buffer.length > 1000, '试听应返回真实音频');
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});
 await test('old prompt completion cannot delete replacement queue after reset', async (h) => {
   const release = [];
   h.api.sessions.prompt = async () => {
@@ -427,6 +482,7 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
       ['GET', '/api/dsh/model'], ['POST', '/api/dsh/effort'],
       ['GET', '/api/whitelist'], ['POST', '/api/whitelist'], ['POST', '/api/restart'],
       ['POST', '/api/console/token'], ['GET', '/api/role'], ['POST', '/api/role'],
+      ['GET', '/api/connection'], ['GET', '/api/connection/secret?name=dsh'], ['POST', '/api/connection'],
     ];
     for (const [method, path] of mustDeny) {
       const res = await call(path, method, asAgent, method === 'POST' ? {} : undefined);
@@ -499,5 +555,106 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
   } catch (error) { failures++; console.error('FAIL console transport guards:', error.message); }
   finally { await new Promise((resolve) => server.close(resolve)); await h.close(); }
 }
+
+await test('控制台可查看并保存 DSH / SnowLuma 连接配置（密钥只回显掩码）', async (h) => {
+  const server = h.startConsoleServer();
+  if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+  const port = server.address().port;
+  const call = (path, method = 'GET', body) => new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: '127.0.0.1', port, path, method, headers: { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token' } },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          let parsed = {};
+          try { parsed = JSON.parse(text || '{}'); } catch {}
+          resolve({ status: response.statusCode, body: parsed, text });
+        });
+      }
+    );
+    request.on('error', reject);
+    request.setTimeout(3000, () => request.destroy(new Error('request hung')));
+    request.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+  try {
+    const got = await call('/api/connection');
+    assert.equal(got.status, 200, got.text);
+    assert.equal(got.body.dsh.host, '127.0.0.1');
+    assert.equal(got.body.dsh.port, 3080);
+    assert.equal(got.body.dsh.tokenSet, true);
+    assert.ok(!got.text.includes('fixture-only'), 'GET 不得回显完整 DSH 令牌');
+    assert.match(got.body.dsh.tokenPreview, /^fixt…only$/);
+
+    const revealed = await call('/api/connection/secret?name=dsh');
+    assert.equal(revealed.status, 200);
+    assert.equal(revealed.body.value, 'fixture-only', '显式请求才能拿到完整令牌');
+
+    const bad = await call('/api/connection', 'POST', { dsh: { scheme: 'http', host: 'http://evil/x', port: 3080 } });
+    assert.equal(bad.status, 400, '主机里不允许带协议/路径');
+
+    const saved = await call('/api/connection', 'POST', {
+      dsh: { scheme: 'https', host: 'dsh.example', port: 443, authToken: 'new-dsh-key', allowRemote: true },
+      snowluma: {
+        http: { scheme: 'http', host: '10.0.0.5', port: 3100 },
+        ws: { scheme: 'ws', host: '10.0.0.5', port: 3101 },
+        accessToken: 'new-sl-key',
+        followDiscoveredEndpoint: false,
+      },
+    });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.restartRequired, false, '热重载不应该要求重启');
+    assert.equal(saved.body.applied?.dsh, true);
+    assert.equal(saved.body.applied?.snowluma, true);
+    assert.equal(h.cfg.dsh.baseUrl, 'https://dsh.example:443', '运行中的 DSH 地址应已热更新');
+    assert.equal(h.cfg.dsh.authToken, 'new-dsh-key');
+    assert.equal(h.api.baseUrl, 'https://dsh.example:443', 'api 客户端应切到新地址');
+    assert.equal(h.api.launchToken, 'new-dsh-key', 'api 客户端应使用新令牌');
+    assert.equal(h.cfg.snowluma.httpUrl, 'http://10.0.0.5:3100');
+    assert.equal(h.cfg.snowluma.wsUrl, 'ws://10.0.0.5:3101');
+    assert.equal(h.cfg.snowluma.accessToken, 'new-sl-key');
+    const file = JSON.parse((await import('node:fs')).readFileSync(`${h.temp}/config.json`, 'utf8'));
+    assert.equal(file.dsh.baseUrl, 'https://dsh.example:443');
+    assert.equal(file.dsh.authToken, 'new-dsh-key');
+    assert.equal(file.dsh.allowRemote, true);
+    assert.equal(file.snowluma.httpUrl, 'http://10.0.0.5:3100');
+    assert.equal(file.snowluma.wsUrl, 'ws://10.0.0.5:3101');
+    assert.equal(file.snowluma.accessToken, 'new-sl-key');
+    assert.equal(file.snowluma.followDiscoveredEndpoint, false);
+    assert.equal(file.consoleToken, 'fixture-console-token', '其它配置必须原样保留');
+
+    const noop = await call('/api/connection', 'POST', {
+      dsh: { scheme: 'https', host: 'dsh.example', port: 443, authToken: 'new-dsh-key', allowRemote: true },
+      snowluma: {
+        http: { scheme: 'http', host: '10.0.0.5', port: 3100 },
+        ws: { scheme: 'ws', host: '10.0.0.5', port: 3101 },
+        accessToken: 'new-sl-key',
+        followDiscoveredEndpoint: false,
+      },
+    });
+    assert.deepEqual(noop.body.changed, [], '相同配置不应产生新的变更');
+    assert.equal(noop.body.restartRequired, false, '热重载后再次保存不应要求重启');
+
+    const afterSave = await call('/api/connection');
+    assert.equal(afterSave.body.pendingRestart, undefined, '热重载后不应再有待重启状态');
+    assert.equal(afterSave.body.dsh.host, 'dsh.example', '保存后应立即返回新地址');
+    assert.equal(afterSave.body.hotReload, true);
+    assert.ok(!afterSave.text.includes('new-dsh-key'), 'GET 仍不得回显完整令牌');
+    const revealedNew = await call('/api/connection/secret?name=dsh');
+    assert.equal(revealedNew.body.value, 'new-dsh-key', '显示当前值应返回新令牌');
+
+    // 热重载的接线：mux 必须带可中止的 signal，保存时要主动 abort/唤醒退避。
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
+    assert.match(source, /api\.events\.mux\(\{\}, controller\.signal\)/, 'mux 必须接受热重载中止信号');
+    assert.match(source, /muxRestart\?\.abort\(\)/, '保存后必须中止旧事件流');
+    assert.match(source, /muxWakeSleep\?\.\(\)/, '保存后必须唤醒重连退避');
+    assert.match(source, /bot\.close\(1000, 'config-reload'\)/, 'SnowLuma 必须主动重连');
+    assert.match(source, /skipHealAfterConfigReload/, '热重载后的主动断开不得触发 token 自愈覆盖用户配置');
+    console.log('PASS console can read/save DSH and SnowLuma connection config with masked secrets');
+  } catch (error) { failures++; console.error('FAIL connection config:', error.message); }
+  finally { await new Promise((resolve) => server.close(resolve)); await h.close(); }
+});
 
 if (failures) process.exitCode = 1;

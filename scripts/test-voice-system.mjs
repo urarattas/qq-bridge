@@ -118,7 +118,7 @@ console.log('## 各入口 import 的符号都真实存在');
 console.log('## qq-bridge 语音系统：路由与开关');
 {
   const bridge = read('src/bridge.js');
-  for (const route of ["'/api/voice/send'", "'/api/send/voice'", "'/api/socialV2/send-voice'", "'/api/voice/list'", "'/api/socialV2/voices'"]) {
+  for (const route of ["'/api/voice/send'", "'/api/send/voice'", "'/api/socialV2/send-voice'", "'/api/voice/list'", "'/api/socialV2/voices'", "'/api/voice/tts'", "'/api/voice/tts/engines'", "'/api/voice/preview'"]) {
     ok(bridge.includes(route), `路由 ${route}`);
   }
   ok(/v2ToolEnabled\('sendVoice'\)/.test(bridge), 'AI 路由受 tools.sendVoice 开关控制');
@@ -168,6 +168,7 @@ console.log('## qq-bridge 语音系统：控制台与 preset');
   const html = read('public/console.html');
   ok(html.includes('data-v2-tool="sendVoice"'), '控制台有 sendVoice 工具开关');
   ok(html.includes('id="voiceList"') && html.includes('id="voiceSendBtn"'), '控制台有语音库调试面板');
+  ok(html.includes('id="voiceTtsBtn"') && html.includes('id="voicePreviewBtn"'), '控制台有语音合成与试听');
   ok(/api\/voice\/list/.test(html) && /api\/voice\/send/.test(html), '面板调用操作者端点');
   const preset = read(path.join('dsh', 'agent-presets', 'qq-chat-v2', 'agent.cordis.yml'));
   ok(preset.includes('qq_send_voice') && preset.includes('qq_list_voices'), 'qq-chat-v2 人设描述语音能力');

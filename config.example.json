@@ -25,6 +25,9 @@
     }
   },
   "ownerQQ": null,
+  "lib": {
+    "autoLaunch": true
+  },
   "sessionCwd": "",
   "agentPreset": "qq-chat",
   "workspaceTitle": "QQ 聊天",
@@ -77,6 +80,14 @@
     "agentPreset": "qq-chat-v2",
     "provideRecommendations": true,
     "tools": {
+      "status": true,
+      "rawApi": true,
+      "listGroups": true,
+      "groupHistory": true,
+      "getGroupMembers": true,
+      "webSearch": true,
+      "webFetch": true,
+      "hostStatus": true,
       "getPrompt": true,
       "getUnread": true,
       "getRecent": true,
@@ -196,7 +207,14 @@
       "defaultVolume": 1,
       "loudness": "normal",
       "ffmpegPath": "",
-      "autoReadback": true
+      "autoReadback": true,
+      "tts": {
+        "engine": "auto",
+        "meloPath": "",
+        "speed": 1,
+        "maxChars": 500,
+        "timeoutMs": 120000
+      }
     },
     "proactive": {
       "enabled": true,

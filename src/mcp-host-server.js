@@ -4,22 +4,17 @@
 // 工具：
 //   snowluma_status   —— 检查网关是否在线（只读：HTTP get_login_info）与账号信息
 //
-// ── 为什么这里**没有**启停 SnowLuma 的工具（2026-09-20 移除，不要加回来）────────────
+// ── 为什么这里**没有**启停 SnowLuma 的 MCP 工具（2026-09-20 移除，不要加回来）─────
 //
 // 曾经有 `start_snowluma` / `stop_snowluma`（`spawn launcher.bat` / `taskkill`），默认关闭、
-// 需要 `snowluma.allowProcessControl: true` 才注册。它们被移除，理由不是"危险"，而是**许可**：
+// 需要 `snowluma.allowProcessControl: true` 才注册。它们被移除，理由不是"危险"，而是**许可**
+// 与边界：SnowLuma EULA §5.4 规定「并入第三方安装包或 Docker 镜像、通过自动化脚本部署」
+// 须事先取得书面授权；把进程控制交给**群里的模型**也远超这个工具需要的权限。
 //
-//   SnowLuma EULA §5.4（中文为准）：「除事先取得著作权人的书面授权外，您仅可为 LICENSE 允许的
-//   非商业用途，以专有组件随本软件提供的形式运行该组件；不得复制、修改、单独再分发或再许可该组件。
-//   **将其并入第三方安装包或 Docker 镜像、通过自动化脚本部署**，或者将其用于任何商业用途，
-//   均须事先取得书面授权。」
-//
-// 原生组件是**专有组件**；由本程序**程序化启动/结束**它，落在"通过自动化脚本部署"的射程内。
-// 即便是"用户已装好、我们帮忙拉起"，也不值得为这点便利去踩一条需要书面授权的条款。
-//
-// 设计不变量 L6（见规划集 QSH_PLAN.md §6.0）：**QSH 只探测、不部署**——
-// 永不安装、复制、打包或自动部署 SnowLuma 及其原生组件，也不程序化启停其进程。
-// 用户在 QQ 侧不可用时得到的应该是**可操作的提示**（"请自行启动 SnowLuma"），而不是被代劳。
+// 注意区分：**桥接启动时**会扫描用户在 `lib/<名称>/launcher.*` 放好的启动器并尝试拉起
+// （见 src/lib-autolaunch.js，可用 `config.lib.autoLaunch: false` 关闭）。那只是运行用户
+// 已安装的本机程序，不安装、不复制、不打包、不下载，也不暴露给 agent；用户需自行确保
+// 对该程序拥有相应授权。MCP 侧依然只有只读探活，不会替模型启停任何进程。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,9 +68,18 @@ async function gatewayInfo() {
 
 const server = new McpServer({ name: 'snowluma-host', version: '0.2.1-r1' });
 
-server.tool(
+// 控制台「二代仿真 → 工具开关」的 hostStatus；只在 reserved2 下按开关隐藏。
+const hostToolEnabled = (() => {
+  let mode = '';
+  let tools = {};
+  try { mode = String(JSON.parse(fs.readFileSync(path.join(ROOT, 'state', 'mode.json'), 'utf8'))?.mode ?? ''); } catch {}
+  try { tools = getConfig()?.socialV2?.tools ?? {}; } catch {}
+  return !(mode === 'reserved2' && tools?.hostStatus === false);
+})();
+
+if (hostToolEnabled) server.tool(
   'snowluma_status',
-  '检查 SnowLuma OneBot 网关是否在线（只读探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息。网关不可达时返回可操作的提示（本程序不会代你启动 SnowLuma）。',
+  '检查 SnowLuma OneBot 网关是否在线（只读探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息。网关不可达时返回可操作的提示（桥接启动时会尝试拉起 lib/SnowLuma/launcher.bat，可用 config.lib.autoLaunch 关闭）。',
   {},
   async () => {
     const hc = getHostConfig();
@@ -83,7 +87,7 @@ server.tool(
     // 只读工具：不再暴露本机路径/PID（那需要进程控制能力，而该能力已被移除）。
     const payload = { ...info };
     if (info.reachable === false) {
-      payload.hint = 'SnowLuma 网关不可达。请自行启动 SnowLuma（本程序不代装、不代启，原因见项目文档的合规说明 L6）。'
+      payload.hint = 'SnowLuma 网关不可达。请检查 lib/SnowLuma/launcher.bat 是否存在并成功启动（config.lib.autoLaunch 关闭时需手动启动）。'
         + (hc.homeDir ? '' : ' 若 config.json 的 snowluma.httpUrl 与实际端口不一致，也请一并检查。');
     }
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };

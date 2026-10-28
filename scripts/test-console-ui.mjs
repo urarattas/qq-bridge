@@ -178,8 +178,8 @@ try {
     await fill('v2WaitDefaultQuietMs', 0);
     await fill('v2MaxSendMin', 0);
     await check('v2ProvideRecommendations', false);
-    const firstTool = page.locator('[data-v2-tool]').first();
-    await reveal('[data-v2-tool]');
+    const firstTool = page.locator('[data-v2-tool="getPrompt"]');
+    await reveal('[data-v2-tool="getPrompt"]');
     await firstTool.setChecked(false);
     const body = await clickWrite('#v2ConfigSaveTop', '/api/socialV2/config');
     assert.equal(body.wake.recommendedSleepMinMs, 420000);
@@ -536,6 +536,47 @@ try {
     assert.match(await page.locator('#dshModelNote').textContent(), /全局默认/, '必须说明切换模型会改 DSH 全局默认');
   });
 
+  if (!original) await test('语音合成面板从桥接读取引擎/音色，支持试听与试发（不发写请求）', async () => {
+    await navigate('social-v2');
+    await page.waitForFunction(() => document.getElementById('voiceTtsEngine').options.length > 0);
+    const engines = await page.locator('#voiceTtsEngine option').evaluateAll((nodes) => nodes.map((n) => n.value));
+    assert.deepEqual(engines, ['sapi', 'melo'], `合成引擎应来自桥接，实际 ${engines.join(',')}`);
+    await page.waitForFunction(() => document.getElementById('voiceTtsVoice').options.length > 0);
+    const voices = await page.locator('#voiceTtsVoice option').evaluateAll((nodes) => nodes.map((n) => n.value));
+    assert.ok(voices.includes('Microsoft Huihui Desktop'), '音色下拉应包含系统语音音色');
+    await reveal('#voiceTtsEngine');
+    await page.locator('#voiceTtsEngine').selectOption('melo');
+    await page.waitForFunction(() => document.getElementById('voiceTtsVoice').value === 'ZH');
+    assert.equal(await page.locator('#voiceTtsText').getAttribute('maxlength'), '500', '合成文本上限来自配置');
+    await reveal('#voicePreviewBtn');
+    assert.equal(await page.locator('#voicePreviewBtn').isVisible(), true, '应有试听按钮');
+    assert.equal(await page.locator('#voiceSendBtn').isVisible(), true, '应保留试发按钮');
+    // 只触发 GET，不提交合成/发送，避免改变写载荷 baseline。
+    await page.locator('#voiceTtsRefresh').click();
+    await page.waitForFunction(() => document.getElementById('voiceTtsMsg').textContent === '');
+  });
+
+  if (!original) await test('服务连接面板：显示 DSH/SnowLuma 地址端口与掩码密钥，保存后提示重启', async () => {
+    await navigate('access');
+    await page.waitForFunction(() => document.getElementById('connDshHost').value === '127.0.0.1');
+    assert.equal(await page.locator('#connDshPort').inputValue(), '3080');
+    assert.equal(await page.locator('#connSlHttpPort').inputValue(), '3000');
+    assert.equal(await page.locator('#connSlWsPort').inputValue(), '3001');
+    assert.equal(await page.locator('#connDshToken').getAttribute('type'), 'password', '密钥默认必须是掩码');
+    assert.match(await page.locator('#connDshTokenHint').textContent(), /fixt…only/, '密钥提示只显示首尾');
+    // 「显示当前值」按需向桥接取完整令牌，绝不放进首屏 GET。
+    await page.locator('#connDshReveal').click();
+    await page.waitForFunction(() => document.getElementById('connDshToken').value === 'fixture-dsh-token');
+    assert.equal(await page.locator('#connDshToken').getAttribute('type'), 'text');
+    // 改端口并保存，断言写载荷包含地址/端口且提示需重启。
+    await fill('connDshPort', '3081');
+    const body = await clickWrite('#connSave', '/api/connection');
+    assert.equal(body.dsh.host, '127.0.0.1');
+    assert.equal(String(body.dsh.port), '3081');
+    assert.equal(body.snowluma.http.port, '3000');
+    await page.waitForFunction(() => /已保存并热重载/.test(document.getElementById('connMsg').textContent));
+  });
+
   if (!original) await test('思考强度：档位来自 DSH、默认 max、可切换并明示全局副作用', async () => {
     await navigate('overview');
     await page.waitForFunction(() => document.getElementById('dshEffortSelect').options.length > 0);
@@ -550,7 +591,8 @@ try {
     ]);
     assert.equal(saved.status(), 200);
     assert.equal((await saved.json()).reasoningEffort, 'high');
-    assert.match(await page.locator('#dshEffortMsg').textContent(), /high/);
+    // 3 秒轮询会主动清空这条提示，因此用 waitForFunction 抓它出现的那一刻，避免读空。
+    await page.waitForFunction(() => /high/.test(document.getElementById('dshEffortMsg').textContent));
     // 改回默认，避免影响后续断言
     await page.locator('#dshEffortSelect').selectOption('max');
     await page.locator('#dshEffortSave').click();

@@ -1897,7 +1897,6 @@ button:active:not(:disabled) {
 <section id="section-social-v2" data-page="social-v2" class="card span-all">
       <h2>二代仿真模式（reserved2）控制台</h2>
       <div class="meta">配置保存后写入 config.json 并热更新；工具开关决定 AI 能调用哪些工具。已接入开关的工具在<b>重启 DSH 后</b>会从工具清单里彻底消失（少一份 schema 就少一份每次请求的 token）；发送类等跨模式共用的工具只在调用时被桥接拒绝，清单不变。</div>
-
       <div class="row" style="margin-top:10px">
         <label style="flex:1">启用二代模式</label><input type="checkbox" id="v2Enabled" style="width:auto">
         <label style="flex:1">agentPreset</label><input type="text" id="v2AgentPreset" placeholder="qq-chat-v2" style="max-width:200px">
@@ -1913,9 +1912,25 @@ button:active:not(:disabled) {
         <button id="v2ConfigSaveTop" style="font-weight:bold;padding:6px 14px">保存当前参数</button>
         <span class="meta" id="v2ActivityStatus">读取中…</span>
       </div>
+      <div class="row" style="margin-top:8px;align-items:center">
+        <span class="meta" id="v2ToolsSummary" style="flex:1">工具开关读取中…</span>
+        <button id="v2ToolsJump" class="small">调整工具开关（含 SnowLuma API）</button>
+      </div>
 
-      <details class="settings-group"><summary>工具开关（关闭后 AI 不再拿到该工具；需重启 DSH 刷新工具清单，重启前仅调用时拒绝）</summary><div class="settings-content">
+      <details class="settings-group" id="v2ToolsGroup"><summary>工具开关（全部 MCP 工具，含 SnowLuma 全量 API：qq_api / qq_api_help；关闭后 AI 不再拿到该工具，需重启 DSH 刷新工具清单）</summary><div class="settings-content">
+      <div class="row" style="margin-bottom:8px">
+        <input id="v2ToolSearch" placeholder="筛选工具：如 snowluma / qq_api / 语音 / 表情" style="max-width:360px">
+        <span class="meta" id="v2ToolsCount"></span>
+      </div>
       <div class="v2-tool-list" id="v2Tools">
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="status"> <span><b>qq_status</b><span class="meta">查询机器人登录状态与账号信息（只读）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="rawApi"> <span><b>SnowLuma API（qq_api / qq_api_help）</b><span class="meta">SnowLuma 全量 190 个 OneBot API 直连（含管理动作）与目录查询；开关名 rawApi，关闭后重启 DSH 即从清单消失</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="listGroups"> <span><b>qq_list_groups</b><span class="meta">群列表（只读；仅 closed-agent 注册，此开关会影响 closed-agent）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="groupHistory"> <span><b>qq_get_group_history</b><span class="meta">群历史（只读；仅 closed-agent 注册，此开关会影响 closed-agent）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getGroupMembers"> <span><b>qq_get_group_members</b><span class="meta">群成员列表（只读，群号必须白名单）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="webSearch"> <span><b>mcp__web-search-safe__web_search</b><span class="meta">只读联网搜索（DeepSeek 优先，Bing 兜底）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="webFetch"> <span><b>mcp__web-search-safe__web_fetch</b><span class="meta">只读抓取网页正文（SSRF 防护）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="hostStatus"> <span><b>mcp__snowluma-host__snowluma_status</b><span class="meta">SnowLuma 网关在线状态探活（只读）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getPrompt"> <span><b>qq_get_prompt</b><span class="meta">查看角色卡、推荐值、可用工具、当前唤醒配置</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getUnread"> <span><b>qq_get_unread_messages</b><span class="meta">查看未读消息，不自动标记已读</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="getRecent"> <span><b>qq_get_recent_messages</b><span class="meta">查看最近消息，支持 offset 扩大范围</span></span></label>
@@ -1950,13 +1965,35 @@ button:active:not(:disabled) {
       <div class="meta" style="margin-top:6px">二代黑话学习：AI 可用 <code>qq_slang_submit</code> 提交陌生词，也可由桥接自动提取；管理员在「黑话词库」页面筛选确认后，词条会自动写入黑话提示词并注入 <code>qq_get_prompt</code> 与后续唤醒。</div>
 
       </div></details>
-<details class="settings-group"><summary>语音库与语音发送（调试）</summary><div class="settings-content">
+<details class="settings-group"><summary>语音库、语音合成与发送（调试）</summary><div class="settings-content">
       <div class="meta" style="margin-bottom:8px">
-        语音库目录：<code>qq-bridge/audio/</code>（改 <code>socialV2.voice.dir</code> 可换）。把音频文件丢进去即可被 AI 用 <code>qq_send_voice</code> 发出；
-        本面板用于调试与试发 —— 试发走的是与 AI 通道相同的解析/校验/限流路径（<code>/api/voice/send</code>），只是由你在控制台触发。
+        语音库目录：<code>qq-bridge/audio/</code>（改 <code>socialV2.voice.dir</code> 可换）。除手动放入音频外，本面板可用
+        <b>MeloTTS</b>（把 MeloTTS 装进 <code>lib/MeloTTS/</code>，或让 <code>melo</code> 在 PATH 中）或
+        <b>系统语音合成</b>（Windows SAPI）把文字直接合成到语音库。
+        试发与 AI 通道共用同一套解析/校验/限流路径（<code>/api/voice/send</code>），只是由你在控制台触发。
       </div>
       <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+        <label style="flex:0 0 auto">合成引擎</label>
+        <select id="voiceTtsEngine" style="width:190px"></select>
+        <label style="flex:0 0 auto">音色</label>
+        <select id="voiceTtsVoice" style="width:200px"></select>
+        <label style="flex:0 0 auto">语速</label>
+        <input type="number" id="voiceTtsSpeed" min="0.5" max="2" step="0.1" value="1" style="width:80px">
+        <label style="flex:0 0 auto">文件名</label>
+        <input type="text" id="voiceTtsName" placeholder="可选，默认 tts-时间.wav" style="width:180px">
+        <button id="voiceTtsRefresh" type="button" class="small">重新检测引擎</button>
+      </div>
+      <textarea id="voiceTtsText" maxlength="500" rows="3" placeholder="输入要让机器人用语音说的话（最多 500 字）…" style="width:100%;margin-top:8px;box-sizing:border-box"></textarea>
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px">
+        <button id="voiceTtsBtn" type="button">合成到语音库</button>
+        <span id="voiceTtsMsg" class="meta"></span>
+        <span id="voiceTtsHint" class="meta"></span>
+      </div>
+      <audio id="voicePreview" controls preload="none" style="width:100%;margin-top:8px"></audio>
+      <hr style="border:0;border-top:1px solid var(--line,#ddd);margin:12px 0">
+      <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
         <button id="voiceRefreshBtn" type="button" class="btn-secondary">刷新语音库</button>
+        <button id="voicePreviewBtn" type="button" class="btn-secondary">试听选中</button>
         <label style="flex:0 0 auto">发送目标</label>
         <input type="text" id="voiceSendTarget" placeholder="group:100005" style="width:190px">
         <label style="flex:0 0 auto"><input type="checkbox" id="voiceSendDryRun" style="width:auto"> 只校验不发送</label>
@@ -2316,22 +2353,117 @@ button:active:not(:disabled) {
     </section>
 <section id="section-reference" data-page="reference" class="card span-all">
       <h2>DSH 侧 MCP 工具</h2>
-      <div class="meta">由 qq-bridge 的 MCP server 提供给 DSH agent；修改后需重启 DSH 才会刷新工具 schema。</div>
+      <div class="meta">由 qq-bridge 的三个 MCP server 提供给 DSH agent；修改后需重启 DSH 才会刷新工具 schema。「二代仿真 → 工具开关」可逐个启停（只对 reserved2 生效，通用工具在其它模式下不受影响）。</div>
       <table>
-        <tr><th>工具</th><th>说明</th></tr>
-        <tr><td>qq_status</td><td>登录状态（只读）</td></tr>
-        <tr><td>qq_api</td><td><b>SnowLuma 全量 OneBot v11 API</b>（190 个动作；action + params 直连 SnowLuma，包含管理/敏感动作）</td></tr>
+        <tr><th colspan="2">snowluma-safe · QQ 通用与发送</th></tr>
+        <tr><td>qq_status</td><td>登录状态与账号信息（只读）</td></tr>
+        <tr><td>qq_api</td><td><b>SnowLuma 全量 OneBot v11 API</b>（190 个动作；action + params 直连，含管理/敏感动作）</td></tr>
         <tr><td>qq_api_help</td><td>查询全量 API 目录：动作名、是否只读、说明、参数名（只读）</td></tr>
-        <tr><td>qq_list_groups</td><td>群列表（只返回白名单群；仅 closed-agent）</td></tr>
+        <tr><td>qq_list_groups</td><td>群列表（只返回白名单群；仅 closed-agent 注册）</td></tr>
         <tr><td>qq_get_group_members</td><td>群成员（只读，群号必须白名单）</td></tr>
-        <tr><td>qq_get_group_history</td><td>群历史（只读，含 message_id，可作引用目标；仅 closed-agent）</td></tr>
+        <tr><td>qq_get_group_history</td><td>群历史（只读，含 message_id；仅 closed-agent 注册）</td></tr>
         <tr><td>qq_send_group_message</td><td>发群消息；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
         <tr><td>qq_reply</td><td>专用“引用/回复”：在群里引用某条消息并发送文本</td></tr>
         <tr><td>qq_send_private_message</td><td>发私聊；可选 <code>replyToMessageId</code> 引用/回复</td></tr>
+        <tr><th colspan="2">snowluma-safe · 二代工具（reserved2）</th></tr>
+        <tr><td>qq_get_prompt</td><td>角色卡、推荐值、可用工具、唤醒配置</td></tr>
+        <tr><td>qq_get_unread_messages</td><td>未读消息（不自动标记已读）</td></tr>
+        <tr><td>qq_get_recent_messages</td><td>最近消息（支持 offset 扩大范围）</td></tr>
+        <tr><td>qq_social_state</td><td>当前 WakeConfig、未读数、上次唤醒原因</td></tr>
+        <tr><td>qq_mark_read</td><td>标记未读为已读（看过但不回复）</td></tr>
+        <tr><td>qq_set_wake_config</td><td>设置唤醒/潜水条件与已读水位</td></tr>
+        <tr><td>qq_send_burst</td><td>按数组分多条发送，自动加真人化间隔</td></tr>
+        <tr><td>qq_send_message</td><td>统一发送：一条/多条/引用/自定义间隔</td></tr>
+        <tr><td>qq_send_poke</td><td>QQ 拍一拍</td></tr>
+        <tr><td>qq_wait_for_messages</td><td>等待新消息（长轮询）</td></tr>
+        <tr><td>qq_report_feedback</td><td>向控制台反馈问题/困惑</td></tr>
+        <tr><td>qq_get_my_recent_messages</td><td>自己最近发过的消息</td></tr>
+        <tr><td>qq_get_message_detail</td><td>按 message_id 查看单条消息完整内容</td></tr>
+        <tr><td>qq_get_active_members</td><td>最近活跃成员</td></tr>
+        <tr><td>qq_memory_append / query / remove / clear</td><td>轻量记忆：话题、想说未说的话、群友印象</td></tr>
         <tr><td>qq_slang_query / qq_slang_submit</td><td>查询已确认黑话 / 提交陌生词给管理员筛选</td></tr>
+        <tr><td>qq_get_message_images</td><td>查看消息中的图片/表情内容</td></tr>
+        <tr><td>qq_list_stickers / qq_get_sticker_image</td><td>收藏表情列表 / 看图理解</td></tr>
+        <tr><td>qq_send_sticker / qq_collect_sticker</td><td>发送收藏表情 / 收藏别人发的表情</td></tr>
+        <tr><td>qq_sticker_note / qq_set_sticker_remark</td><td>本地表情笔记 / 修改 QQ 官方备注（默认关闭）</td></tr>
+        <tr><td>qq_get_forward_msg</td><td>查看合并转发消息</td></tr>
+        <tr><td>qq_get_self_image</td><td>查看自己的默认 Q 版形象</td></tr>
+        <tr><td>qq_send_voice / qq_list_voices</td><td>发送语音条 / 查看语音库（默认关闭）</td></tr>
+        <tr><th colspan="2">snowluma-host</th></tr>
+        <tr><td>snowluma_status</td><td>SnowLuma 网关在线状态探活（只读）</td></tr>
+        <tr><th colspan="2">web-search-safe</th></tr>
+        <tr><td>web_search</td><td>只读联网搜索（DeepSeek 优先、Bing 兜底）</td></tr>
+        <tr><td>web_fetch</td><td>只读抓取网页正文（禁止内网/本机地址）</td></tr>
       </table>
-      <div class="meta" style="margin-top:10px">二代仿真模式工具：qq_get_prompt / qq_get_unread_messages / qq_get_recent_messages / qq_social_state / qq_send_burst / qq_send_message / qq_wait_for_messages / qq_set_wake_config / qq_mark_read / qq_memory_* / qq_send_poke / qq_list_stickers / qq_get_sticker_image / qq_send_sticker / qq_collect_sticker / qq_sticker_note / qq_get_message_images / qq_get_forward_msg / qq_get_self_image / qq_send_voice / qq_list_voices 等。</div>
-      <div class="meta" style="margin-top:6px">⚠️ <code>qq_api</code> 默认开启，可调用禁言、踢人、撤回、改群资料、文件、QQ 空间、凭据读取等全部 SnowLuma 动作；不需要时把 <code>config.json</code> 的 <code>snowluma.mcp.rawApi</code> 设为 <code>false</code> 后重启 DSH。</div>
+      <div class="meta" style="margin-top:10px">工具开关与 MCP 工具的对应关系：<code>status→qq_status</code>、<code>rawApi→qq_api/qq_api_help</code>、<code>listGroups→qq_list_groups</code>、<code>groupHistory→qq_get_group_history</code>、<code>getGroupMembers→qq_get_group_members</code>、<code>sendGroup→qq_send_group_message</code>、<code>sendPrivate→qq_send_private_message</code>、<code>reply→qq_reply</code>、<code>webSearch/webFetch→mcp__web-search-safe__*</code>、<code>hostStatus→mcp__snowluma-host__snowluma_status</code>；其余开关与同名 QQ 工具一一对应。</div>
+      <div class="meta" style="margin-top:6px">⚠️ <code>qq_api</code> 默认开启，可调用禁言、踢人、撤回、改群资料、文件、QQ 空间、凭据读取等全部 SnowLuma 动作；不需要时在「工具开关」关闭 <code>rawApi</code>（或把 <code>config.json</code> 的 <code>snowluma.mcp.rawApi</code> 设为 <code>false</code>）后重启 DSH。</div>
+    </section>
+<section id="section-connection" data-page="access" class="card span-all">
+      <h2 data-note="保存后立即热重载">服务连接（DSH / SnowLuma）</h2>
+      <div class="meta">在这里填写 DSH 与 SnowLuma 的地址、端口和访问令牌，保存会原子写入 <code>config.json</code>，并<strong>立即热重载</strong>到运行中的连接（DSH 事件流重连、SnowLuma WebSocket 重连；HTTP 调用下一次请求即生效）。密钥默认只显示首尾，点「显示当前值」单独读取。</div>
+      <details class="settings-group" open>
+        <summary>DSH</summary>
+        <div class="settings-content">
+          <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+            <label style="flex:0 0 auto">协议</label>
+            <select id="connDshScheme" style="flex:0 0 110px"><option value="http">http</option><option value="https">https</option></select>
+            <label style="flex:0 0 auto">地址</label>
+            <input type="text" id="connDshHost" placeholder="127.0.0.1" autocapitalize="off" spellcheck="false" style="flex:1 1 220px">
+            <label style="flex:0 0 auto">端口</label>
+            <input type="number" id="connDshPort" min="1" max="65535" placeholder="3080" style="flex:0 0 130px">
+          </div>
+          <label>访问令牌（authToken）</label>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <input type="password" id="connDshToken" autocomplete="new-password" placeholder="留空保持不变" style="flex:1 1 260px">
+            <button type="button" class="small" id="connDshReveal">显示当前值</button>
+            <button type="button" class="small" id="connDshClear">清除</button>
+          </div>
+          <div class="meta" id="connDshTokenHint">正在读取…</div>
+          <div class="row" style="margin-top:6px">
+            <label style="flex:1"><input type="checkbox" id="connDshAllowRemote" style="width:auto"> 允许把 DSH 启动令牌发往非本机地址（仅远程 DSH 需要）</label>
+          </div>
+        </div>
+      </details>
+      <details class="settings-group" open>
+        <summary>SnowLuma</summary>
+        <div class="settings-content">
+          <div class="meta"><b>HTTP（OneBot API）</b></div>
+          <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+            <label style="flex:0 0 auto">协议</label>
+            <select id="connSlHttpScheme" style="flex:0 0 110px"><option value="http">http</option><option value="https">https</option></select>
+            <label style="flex:0 0 auto">地址</label>
+            <input type="text" id="connSlHttpHost" placeholder="127.0.0.1" autocapitalize="off" spellcheck="false" style="flex:1 1 220px">
+            <label style="flex:0 0 auto">端口</label>
+            <input type="number" id="connSlHttpPort" min="1" max="65535" placeholder="3000" style="flex:0 0 130px">
+          </div>
+          <div class="meta" style="margin-top:10px"><b>WebSocket（事件流）</b></div>
+          <div class="row" style="align-items:flex-end;gap:8px;flex-wrap:wrap">
+            <label style="flex:0 0 auto">协议</label>
+            <select id="connSlWsScheme" style="flex:0 0 110px"><option value="ws">ws</option><option value="wss">wss</option></select>
+            <label style="flex:0 0 auto">地址</label>
+            <input type="text" id="connSlWsHost" placeholder="127.0.0.1" autocapitalize="off" spellcheck="false" style="flex:1 1 220px">
+            <label style="flex:0 0 auto">端口</label>
+            <input type="number" id="connSlWsPort" min="1" max="65535" placeholder="3001" style="flex:0 0 130px">
+          </div>
+          <label>访问令牌（accessToken）</label>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            <input type="password" id="connSlToken" autocomplete="new-password" placeholder="留空保持不变" style="flex:1 1 260px">
+            <button type="button" class="small" id="connSlReveal">显示当前值</button>
+            <button type="button" class="small" id="connSlClear">清除</button>
+          </div>
+          <div class="meta" id="connSlTokenHint">正在读取…</div>
+          <div class="row" style="margin-top:6px">
+            <label style="flex:1"><input type="checkbox" id="connSlFollow" style="width:auto"> 跟随 SnowLuma 自动发现的端点（手动指定地址/端口时建议关闭）</label>
+          </div>
+        </div>
+      </details>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <button id="connSave">保存并立即生效</button>
+        <button id="connSaveRestart" class="small">保存并重启桥接</button>
+        <button id="connReload" class="small">重新读取</button>
+        <span class="meta" id="connMsg"></span>
+      </div>
+      <div class="meta" id="connStatus"></div>
     </section>
 <section id="section-whitelist" data-page="access" class="card span-all">
       <h2>白名单 / 管理员</h2>
@@ -2629,6 +2761,185 @@ function renderSnowlumaHealth(sl) {
   document.getElementById('snowlumaWarnGood').textContent = goodText;
   el.style.display = '';
 }
+
+// ── 服务连接（DSH / SnowLuma 地址、端口、令牌）─────────────────────────────
+const connEl = (id) => document.getElementById(id);
+const connCleared = { dsh: false, snowluma: false };
+function setConnMsg(text, ok) {
+  const el = connEl('connMsg');
+  el.textContent = text;
+  el.className = 'meta' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+}
+function setConnTokenHint(name, info) {
+  const hint = connEl(name === 'dsh' ? 'connDshTokenHint' : 'connSlTokenHint');
+  const input = connEl(name === 'dsh' ? 'connDshToken' : 'connSlToken');
+  if (connCleared[name]) {
+    hint.textContent = '已标记清除：点「保存」后写入空令牌。';
+    hint.className = 'meta err';
+    input.placeholder = '保存后将清除';
+    return;
+  }
+  hint.className = 'meta';
+  if (info.tokenSet) {
+    hint.textContent = '已配置：' + info.tokenPreview
+      + (name === 'dsh' && info.tokenExplicit === false ? '（自动发现的令牌）' : '')
+      + '；留空保持不变。';
+    input.placeholder = '已配置（' + info.tokenPreview + '），留空保持不变';
+  } else if (name === 'dsh') {
+    hint.textContent = '未配置：留空时桥接会自动发现 DSH 令牌；远程 DSH 请显式填写。';
+    input.placeholder = '未配置（留空则自动发现）';
+  } else {
+    hint.textContent = '未配置：SnowLuma 没启用 accessToken 时可以留空。';
+    input.placeholder = '未配置（留空即可）';
+  }
+}
+async function loadConnectionConfig() {
+  try {
+    const r = await api('/api/connection');
+    if (!r.ok) throw new Error(r.error || '读取连接配置失败');
+    const d = r.dsh || {};
+    const sl = r.snowluma || {};
+    connEl('connDshScheme').value = d.scheme === 'https' ? 'https' : 'http';
+    connEl('connDshHost').value = d.host || '';
+    connEl('connDshPort').value = d.port || '';
+    connEl('connDshAllowRemote').checked = d.allowRemote === true;
+    connEl('connSlHttpScheme').value = sl.http?.scheme === 'https' ? 'https' : 'http';
+    connEl('connSlHttpHost').value = sl.http?.host || '';
+    connEl('connSlHttpPort').value = sl.http?.port || '';
+    connEl('connSlWsScheme').value = sl.ws?.scheme === 'wss' ? 'wss' : 'ws';
+    connEl('connSlWsHost').value = sl.ws?.host || '';
+    connEl('connSlWsPort').value = sl.ws?.port || '';
+    connEl('connSlFollow').checked = sl.followDiscoveredEndpoint !== false;
+    connEl('connDshToken').value = '';
+    connEl('connDshToken').type = 'password';
+    connEl('connSlToken').value = '';
+    connEl('connSlToken').type = 'password';
+    connEl('connDshReveal').dataset.revealed = '0';
+    connEl('connDshReveal').textContent = '显示当前值';
+    connEl('connSlReveal').dataset.revealed = '0';
+    connEl('connSlReveal').textContent = '显示当前值';
+    connCleared.dsh = false;
+    connCleared.snowluma = false;
+    setConnTokenHint('dsh', d);
+    setConnTokenHint('snowluma', sl);
+    connEl('connStatus').textContent = '当前 DSH：' + (d.url || '-') + (d.ready ? '（已连接）' : '（未连接）')
+      + '；SnowLuma HTTP：' + (sl.httpUrl || '-') + '；WS：' + (sl.wsUrl || '-');
+  } catch (e) {
+    setConnMsg('❌ ' + (e.message || e), false);
+  }
+}
+async function revealConnSecret(name) {
+  const input = connEl(name === 'dsh' ? 'connDshToken' : 'connSlToken');
+  const btn = connEl(name === 'dsh' ? 'connDshReveal' : 'connSlReveal');
+  if (btn.dataset.revealed === '1') {
+    input.value = '';
+    input.type = 'password';
+    btn.dataset.revealed = '0';
+    btn.textContent = '显示当前值';
+    return;
+  }
+  try {
+    const r = await api('/api/connection/secret?name=' + encodeURIComponent(name));
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    if (!r.value) {
+      setConnMsg(name === 'dsh'
+        ? '当前没有显式保存的 DSH 令牌（留空会自动发现）。'
+        : '当前没有保存 SnowLuma 令牌。', false);
+      return;
+    }
+    input.value = r.value;
+    input.type = 'text';
+    btn.dataset.revealed = '1';
+    btn.textContent = '隐藏';
+    connCleared[name] = false;
+    setConnTokenHint(name, { tokenSet: true, tokenPreview: r.value.slice(0, 4) + '…' + r.value.slice(-4), tokenExplicit: true });
+  } catch (e) {
+    setConnMsg('❌ ' + (e.message || e), false);
+  }
+}
+function clearConnSecret(name) {
+  const input = connEl(name === 'dsh' ? 'connDshToken' : 'connSlToken');
+  input.value = '';
+  input.type = 'password';
+  connCleared[name] = true;
+  const btn = connEl(name === 'dsh' ? 'connDshReveal' : 'connSlReveal');
+  btn.dataset.revealed = '0';
+  btn.textContent = '显示当前值';
+  setConnTokenHint(name, {});
+}
+async function saveConnectionConfig(restart) {
+  const token = (name, id) => {
+    if (connCleared[name]) return null;
+    const v = connEl(id).value.trim();
+    return v || undefined;
+  };
+  const dshToken = token('dsh', 'connDshToken');
+  const slToken = token('snowluma', 'connSlToken');
+  const body = {
+    dsh: {
+      scheme: connEl('connDshScheme').value,
+      host: connEl('connDshHost').value.trim(),
+      port: connEl('connDshPort').value,
+      allowRemote: connEl('connDshAllowRemote').checked,
+      ...(dshToken !== undefined ? { authToken: dshToken } : {})
+    },
+    snowluma: {
+      http: {
+        scheme: connEl('connSlHttpScheme').value,
+        host: connEl('connSlHttpHost').value.trim(),
+        port: connEl('connSlHttpPort').value
+      },
+      ws: {
+        scheme: connEl('connSlWsScheme').value,
+        host: connEl('connSlWsHost').value.trim(),
+        port: connEl('connSlWsPort').value
+      },
+      followDiscoveredEndpoint: connEl('connSlFollow').checked,
+      ...(slToken !== undefined ? { accessToken: slToken } : {})
+    }
+  };
+  try {
+    const r = await api('/api/connection', 'POST', body);
+    if (!r.ok) { setConnMsg('❌ ' + (r.error || '保存失败'), false); return; }
+    connCleared.dsh = false;
+    connCleared.snowluma = false;
+    if (!r.changed?.length) {
+      setConnMsg('ℹ️ 连接配置没有变化', true);
+      return;
+    }
+    if (restart) {
+      setConnMsg('✅ 已保存，正在重启桥接…（由守护窗口启动时约 5 秒恢复）', true);
+      await api('/api/restart', 'POST', {});
+      return;
+    }
+    if (r.restartRequired) {
+      setConnMsg('✅ 已保存：' + (r.changed || []).join('、') + '；重启桥接后生效', true);
+    } else {
+      const names = [r.applied?.dsh ? 'DSH' : '', r.applied?.snowluma ? 'SnowLuma' : ''].filter(Boolean).join(' / ');
+      const reconnect = [r.applied?.reconnect?.dsh ? 'DSH' : '', r.applied?.reconnect?.snowluma ? 'SnowLuma' : ''].filter(Boolean).join(' / ');
+      const detail = names
+        ? (reconnect && reconnect === names ? names + ' 正在重连' : names + (reconnect ? '；' + reconnect + ' 正在重连' : ''))
+        : '';
+      setConnMsg('✅ 已保存并热重载' + (detail ? '（' + detail + '）' : '')
+        + '：' + (r.changed || []).join('、'), true);
+    }
+    loadConnectionConfig();
+    // 热重载是异步的：稍后再读一次，让「已连接/未连接」反映重连结果。
+    setTimeout(loadConnectionConfig, 3000);
+  } catch (e) {
+    setConnMsg('❌ ' + (e.message || e), false);
+  }
+}
+connEl('connSave').addEventListener('click', () => saveConnectionConfig(false));
+connEl('connSaveRestart').addEventListener('click', () => {
+  if (!confirm('保存并立即重启桥接？重启期间 QQ 连接会短暂中断（守护窗口下约 5 秒恢复）。')) return;
+  saveConnectionConfig(true);
+});
+connEl('connReload').addEventListener('click', loadConnectionConfig);
+connEl('connDshReveal').addEventListener('click', () => revealConnSecret('dsh'));
+connEl('connSlReveal').addEventListener('click', () => revealConnSecret('snowluma'));
+connEl('connDshClear').addEventListener('click', () => clearConnSecret('dsh'));
+connEl('connSlClear').addEventListener('click', () => clearConnSecret('snowluma'));
 
 async function refresh() {
   try {
@@ -3169,13 +3480,23 @@ document.getElementById('aiNotifySend').addEventListener('click', async () => {
   msg.className = r.ok ? 'meta ok' : 'meta err';
 });
 
-// ── 语音库与语音发送（调试面板） ───────────────────────────────────────────
+// ── 语音库、语音合成与发送（调试面板） ─────────────────────────────────────
 // 试发走 /api/voice/send（操作者通道，凭控制台令牌），与 CLI 同一条路径 ——
 // 所以这里能验证「白名单 / 时长体积上限 / 限流 / 文件名审计」是不是真的生效。
+// 合成走 /api/voice/tts：MeloTTS 或系统语音，结果直接落进语音库。
 let voiceEntries = [];
 let voiceLibraryLoaded = false;
+let voiceTtsEngines = [];
+let voiceTtsLoaded = false;
+let voicePreviewUrl = null;
+
+function selectedVoiceEntry() {
+  const pick = document.querySelector('input[name="voicePick"]:checked');
+  return pick ? voiceEntries[Number(pick.value)] : null;
+}
+
 // 只在首次进入/手动刷新时拉取：语音库会逐个 ffprobe 探测时长，放进 3 秒轮询会白白压网关。
-async function loadVoiceLibrary(force) {
+async function loadVoiceLibrary(force, preferredName) {
   if (voiceLibraryLoaded && force !== true) return;
   const box = document.getElementById('voiceList');
   const msg = document.getElementById('voiceMsg');
@@ -3184,10 +3505,11 @@ async function loadVoiceLibrary(force) {
     voiceEntries = Array.isArray(r.voices) ? r.voices : [];
     voiceLibraryLoaded = true;
     if (!voiceEntries.length) {
-      box.innerHTML = '语音库是空的：把音频文件放进 <code>qq-bridge/audio/</code> 后点「刷新语音库」。';
+      box.innerHTML = '语音库是空的：把音频文件放进 <code>qq-bridge/audio/</code>，或用上方合成功能生成一段，再点「刷新语音库」。';
       return;
     }
     const limits = r.limits || {};
+    const selected = preferredName || selectedVoiceEntry()?.name;
     box.innerHTML = '共 ' + voiceEntries.length + ' 个（上限：' + (limits.maxSeconds || '?') + ' 秒 / '
       + Math.round((limits.maxBytes || 0) / 1024 / 1024) + ' MiB / ' + (limits.maxPerMinute || '?') + ' 每分钟）：<br>'
       + voiceEntries.map((v, i) => {
@@ -3196,7 +3518,7 @@ async function loadVoiceLibrary(force) {
         // 语音库目录里放一个名为 `x<img src=x onerror=...>.mp3` 的文件即可注入脚本
         // （CSP 允许 unsafe-inline，拦不住内联事件处理器）。所有插值都必须过 esc()。
         return '<label style="display:block;margin:2px 0">'
-          + '<input type="radio" name="voicePick" value="' + i + '"' + (i === 0 ? ' checked' : '') + '> '
+          + '<input type="radio" name="voicePick" value="' + i + '"' + (v.name === selected || (!selected && i === 0) ? ' checked' : '') + '> '
           + '<code>' + esc(v.name) + '</code> ' + (bad ? '❌ ' + esc(v.error || '不可用') : esc(v.detail || ''))
           + '</label>';
       }).join('');
@@ -3206,14 +3528,122 @@ async function loadVoiceLibrary(force) {
   if (msg) msg.textContent = '';
 }
 
+function renderVoiceTtsVoices() {
+  const engineSelect = document.getElementById('voiceTtsEngine');
+  const voiceSelect = document.getElementById('voiceTtsVoice');
+  const hint = document.getElementById('voiceTtsHint');
+  const engine = voiceTtsEngines.find((item) => item.id === engineSelect.value);
+  voiceSelect.innerHTML = '';
+  if (!engine) { voiceSelect.disabled = true; return; }
+  voiceSelect.disabled = false;
+  for (const voice of engine.voices || []) {
+    const option = document.createElement('option');
+    option.value = voice.id || '';
+    option.textContent = voice.name || voice.id || '默认';
+    voiceSelect.appendChild(option);
+  }
+  if (hint) hint.textContent = engine.warning || engine.description || '';
+}
+
+async function loadVoiceTtsEngines(force) {
+  if (voiceTtsLoaded && force !== true) return;
+  const select = document.getElementById('voiceTtsEngine');
+  const msg = document.getElementById('voiceTtsMsg');
+  try {
+    const r = await api('/api/voice/tts/engines' + (force === true ? '?refresh=1' : ''));
+    voiceTtsEngines = Array.isArray(r.engines) ? r.engines : [];
+    voiceTtsLoaded = true;
+    const previous = select.value;
+    select.innerHTML = '';
+    for (const engine of voiceTtsEngines) {
+      const option = document.createElement('option');
+      option.value = engine.id;
+      option.textContent = engine.name + (engine.voices?.length ? '' : '（未发现音色）');
+      select.appendChild(option);
+    }
+    if (previous && voiceTtsEngines.some((item) => item.id === previous)) select.value = previous;
+    renderVoiceTtsVoices();
+    if (r.config?.maxChars) document.getElementById('voiceTtsText').maxLength = r.config.maxChars;
+    if (!voiceTtsEngines.length) {
+      select.disabled = true;
+      document.getElementById('voiceTtsBtn').disabled = true;
+      const hint = document.getElementById('voiceTtsHint');
+      if (hint) hint.textContent = '未找到语音合成引擎：安装 MeloTTS 到 lib/MeloTTS，或使用 Windows 系统语音。';
+    } else {
+      select.disabled = false;
+      document.getElementById('voiceTtsBtn').disabled = false;
+    }
+  } catch (error) {
+    if (msg) { msg.textContent = '❌ 检测合成引擎失败：' + (error && error.message ? error.message : error); msg.className = 'meta err'; }
+  }
+}
+
+async function synthesizeVoiceFromConsole() {
+  const msg = document.getElementById('voiceTtsMsg');
+  const text = document.getElementById('voiceTtsText').value.trim();
+  const engine = document.getElementById('voiceTtsEngine').value;
+  const voice = document.getElementById('voiceTtsVoice').value;
+  const speed = Number(document.getElementById('voiceTtsSpeed').value) || 1;
+  const name = document.getElementById('voiceTtsName').value.trim();
+  if (!text) { msg.textContent = '❌ 请先输入要合成的文字'; msg.className = 'meta err'; return; }
+  if (!engine) { msg.textContent = '❌ 没有可用的合成引擎'; msg.className = 'meta err'; return; }
+  const btn = document.getElementById('voiceTtsBtn');
+  btn.disabled = true;
+  msg.textContent = '合成中（首次加载 MeloTTS 可能需要几十秒）…'; msg.className = 'meta';
+  try {
+    const r = await api('/api/voice/tts', 'POST', { text, engine, voice, speed, name });
+    if (!r.ok) {
+      msg.textContent = '❌ ' + (r.error || '合成失败');
+      msg.className = 'meta err';
+      return;
+    }
+    msg.textContent = '✅ 已合成 ' + r.file + '（' + (r.engineName || r.engine) + (r.detail ? ' · ' + r.detail : '') + '）';
+    msg.className = 'meta ok';
+    await loadVoiceLibrary(true, r.file);
+    await previewVoice(r.file);
+  } catch (error) {
+    msg.textContent = '❌ ' + (error && error.message ? error.message : error);
+    msg.className = 'meta err';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function previewVoice(name) {
+  const audio = document.getElementById('voicePreview');
+  const msg = document.getElementById('voiceMsg');
+  if (!name) {
+    if (msg) { msg.textContent = '❌ 先刷新语音库并选中一个音频'; msg.className = 'meta err'; }
+    return;
+  }
+  try {
+    const token = localStorage.getItem('consoleToken');
+    const res = await fetch('/api/voice/preview?file=' + encodeURIComponent(name), {
+      headers: token ? { 'x-console-token': token } : {}
+    });
+    if (!res.ok) {
+      let detail = 'HTTP ' + res.status;
+      try { detail = (await res.json()).error || detail; } catch {}
+      throw new Error(detail);
+    }
+    const blob = await res.blob();
+    if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl);
+    voicePreviewUrl = URL.createObjectURL(blob);
+    audio.src = voicePreviewUrl;
+    audio.style.display = '';
+    await audio.play().catch(() => {});
+  } catch (error) {
+    if (msg) { msg.textContent = '❌ 试听失败：' + (error && error.message ? error.message : error); msg.className = 'meta err'; }
+  }
+}
+
 async function sendVoiceFromConsole() {
   const msg = document.getElementById('voiceMsg');
   const target = document.getElementById('voiceSendTarget').value.trim();
   const dryRun = document.getElementById('voiceSendDryRun').checked;
-  const pick = document.querySelector('input[name="voicePick"]:checked');
+  const entry = selectedVoiceEntry();
   if (!target) { msg.textContent = '❌ 请填发送目标（如 group:100005）'; msg.className = 'meta err'; return; }
-  if (!pick) { msg.textContent = '❌ 先刷新语音库并选中一个音频'; msg.className = 'meta err'; return; }
-  const entry = voiceEntries[Number(pick.value)];
+  if (!entry) { msg.textContent = '❌ 先刷新语音库并选中一个音频'; msg.className = 'meta err'; return; }
   msg.textContent = '发送中…'; msg.className = 'meta';
   try {
     const r = await api('/api/voice/send', 'POST', { target, file: entry.name, dryRun });
@@ -3236,6 +3666,33 @@ async function sendVoiceFromConsole() {
 }
 
 // ── 二代仿真模式（reserved2）配置 ─────────────────────────────────────────
+function v2ToolItems() {
+  return [...document.querySelectorAll('[data-v2-tool]')].filter(el => el.closest('.v2-tool-item'));
+}
+
+function updateV2ToolsSummary() {
+  const items = v2ToolItems();
+  const on = items.filter(el => el.checked).length;
+  const rawApi = document.querySelector('[data-v2-tool=rawApi]');
+  const rawText = rawApi ? (rawApi.checked ? 'SnowLuma API 直连已开启' : 'SnowLuma API 直连已关闭') : '';
+  const summary = document.getElementById('v2ToolsSummary');
+  if (summary) summary.textContent = `AI 工具：${on}/${items.length} 开启${rawText ? ' · ' + rawText : ''}`;
+  const count = document.getElementById('v2ToolsCount');
+  if (count) {
+    const visible = items.filter(el => el.closest('.v2-tool-item').style.display !== 'none').length;
+    count.textContent = `显示 ${visible}/${items.length}`;
+  }
+}
+
+function filterV2Tools() {
+  const q = (document.getElementById('v2ToolSearch')?.value || '').trim().toLowerCase();
+  for (const item of document.querySelectorAll('.v2-tool-item')) {
+    const hit = !q || item.textContent.toLowerCase().includes(q);
+    item.style.display = hit ? '' : 'none';
+  }
+  updateV2ToolsSummary();
+}
+
 async function loadV2Config() {
   try {
     const r = await api('/api/socialV2/config');
@@ -3246,6 +3703,7 @@ async function loadV2Config() {
     document.querySelectorAll('[data-v2-tool]').forEach(el => {
       el.checked = (c.tools && c.tools[el.dataset.v2Tool] !== false);
     });
+    updateV2ToolsSummary();
     const w = c.wake || {};
     document.getElementById('v2WakeDefaultMode').value = w.defaultMode === 'active' ? 'active' : 'diving';
     document.getElementById('v2RecDefaultInfinite').checked = w.recommendedDefaultInfinite !== false;
@@ -3813,8 +4271,20 @@ document.getElementById('v2SessionSelect').addEventListener('change', (ev) => {
 
 document.getElementById('v2ConfigSave').addEventListener('click', saveV2Config);
 document.getElementById('v2ConfigSaveTop').addEventListener('click', saveV2Config);
+document.getElementById('v2ToolSearch').addEventListener('input', filterV2Tools);
+document.getElementById('v2Tools').addEventListener('change', updateV2ToolsSummary);
+document.getElementById('v2ToolsJump').addEventListener('click', () => {
+  const group = document.getElementById('v2ToolsGroup');
+  group.open = true;
+  group.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('v2ToolSearch').focus();
+});
 document.getElementById('voiceRefreshBtn').addEventListener('click', () => loadVoiceLibrary(true));
 document.getElementById('voiceSendBtn').addEventListener('click', sendVoiceFromConsole);
+document.getElementById('voicePreviewBtn').addEventListener('click', () => previewVoice(selectedVoiceEntry()?.name));
+document.getElementById('voiceTtsBtn').addEventListener('click', synthesizeVoiceFromConsole);
+document.getElementById('voiceTtsRefresh').addEventListener('click', () => loadVoiceTtsEngines(true));
+document.getElementById('voiceTtsEngine').addEventListener('change', renderVoiceTtsVoices);
 async function refreshV2Activity() {
   try {
     const r = await api('/api/socialV2/activity');
@@ -4320,7 +4790,13 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   if (updateHash && location.hash !== '#' + page) history.pushState({}, '', '#' + page);
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
-  if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') {
+    loadVoiceLibrary();
+    loadVoiceTtsEngines();
+  }
+  if (page === 'access' && typeof loadConnectionConfig === 'function') {
+    loadConnectionConfig();
+  }
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -4397,7 +4873,7 @@ document.querySelectorAll('input,select,textarea').forEach(input => {
     input.setAttribute('aria-label', names[input.id] || input.placeholder || input.closest('section')?.querySelector('h2')?.textContent || '设置');
   }
 });
-const primaryActions = ['roleSet','roleCreate','v2ConfigSave','v2ConfigSaveTop','wlSave','secSave','consoleTokenSave','tsSend','aiNotifySend','slangAdd','slangConfigSave','slangModalDirectConfirm'];
+const primaryActions = ['roleSet','roleCreate','v2ConfigSave','v2ConfigSaveTop','wlSave','secSave','consoleTokenSave','connSave','tsSend','aiNotifySend','slangAdd','slangConfigSave','slangModalDirectConfirm'];
 primaryActions.forEach(id => document.getElementById(id)?.classList.add('primary'));
 document.querySelectorAll('.meta[id$="Msg"], .meta[id$="Msg2"]').forEach(el => el.setAttribute('role','status'));
 document.getElementById('section-mode').querySelector('h2').dataset.note = '选择后即时生效';

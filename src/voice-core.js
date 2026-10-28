@@ -12,6 +12,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// lib/ 里的单文件工具：即使脚本没经 start.bat 启动，也能直接找到 ffmpeg/ffprobe。
+const LIB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib');
+function libExecutable(name) {
+  const candidates = process.platform === 'win32' ? [`${name}.exe`, name] : [name];
+  for (const candidate of candidates) {
+    const file = path.join(LIB_DIR, candidate);
+    try { if (fs.statSync(file).isFile()) return file; } catch {}
+  }
+  return null;
+}
 
 /** 网关能直接吃进去的音频扩展名（SnowLuma 会自动转 SILK）。 */
 export const AUDIO_EXTS = [
@@ -148,7 +160,7 @@ export function safeJoinLibrary(voiceDir, relPath) {
  * ffprobe 探测（时长/编码/sampleRate/channels）。
  * 结果写临时文件回传，stdout/stderr 一律 ignore（受限沙箱下 pipe 会 EPERM）。
  */
-export async function probeAudio(file, { ffprobePath = 'ffprobe', timeoutMs = 10000, tmpDir = null } = {}) {
+export async function probeAudio(file, { ffprobePath = process.env.FFPROBE_PATH || libExecutable('ffprobe') || 'ffprobe', timeoutMs = 10000, tmpDir = null } = {}) {
   const dirs = [tmpDir, path.join(os.tmpdir(), 'voice-probe')].filter(Boolean);
   let dir = null;
   for (const d of dirs) {
@@ -204,7 +216,7 @@ export async function probeAudio(file, { ffprobePath = 'ffprobe', timeoutMs = 10
 export async function inspectAudio(file, {
   maxBytes = DEFAULT_MAX_BYTES,
   maxSeconds = DEFAULT_MAX_SECONDS,
-  ffprobePath = process.env.FFPROBE_PATH || 'ffprobe'
+  ffprobePath = process.env.FFPROBE_PATH || libExecutable('ffprobe') || 'ffprobe'
 } = {}) {
   const warnings = [];
   let st;
@@ -346,6 +358,9 @@ export function resolveFfmpeg({ ffmpegPath = null, envVar = 'FFMPEG_PATH' } = {}
       if (fs.statSync(c).isFile()) return c;
     } catch {}
   }
+  // 其次是仓库 lib/：用户把 ffmpeg.exe 放进去即可，无需改 PATH。
+  const bundled = libExecutable('ffmpeg');
+  if (bundled) return bundled;
   // PATH 里找（不真正执行，交给 spawn 时再报错）；绝不再回退到不存在的候选路径。
   return 'ffmpeg';
 }

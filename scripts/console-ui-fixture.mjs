@@ -308,6 +308,20 @@ export function makeFixtureState() {
       { key: 'private:100001', sessionId: 'demo-owner-20260920', owner: true },
     ],
     v2: { enabled: true, agentPreset: 'qq-chat-v2', provideRecommendations: true, tools: {} },
+    // 服务连接（离线示例）：只展示掩码，完整令牌走 /api/connection/secret。
+    connection: {
+      dsh: {
+        scheme: 'http', host: '127.0.0.1', port: 3080, url: 'http://127.0.0.1:3080',
+        tokenSet: true, tokenPreview: 'fixt…only', tokenExplicit: true, allowRemote: false, ready: true,
+      },
+      snowluma: {
+        http: { scheme: 'http', host: '127.0.0.1', port: 3000 },
+        ws: { scheme: 'ws', host: '127.0.0.1', port: 3001 },
+        httpUrl: 'http://127.0.0.1:3000', wsUrl: 'ws://127.0.0.1:3001',
+        tokenSet: true, tokenPreview: 'snow…oken', followDiscoveredEndpoint: true,
+      },
+    },
+    connectionSecrets: { dsh: 'fixture-dsh-token', snowluma: 'fixture-snowluma-token' },
     // 会话初始提示词（离线示例）：整段内容都是虚构的演示文本。
     initPrompt: '离线示例：这是一个演示用的群聊环境说明，不会写进任何真实配置。',
     slangConfig: { enabled: true, extractMinMessages: 10, extractCooldownMs: 300000, inferenceThresholds: [2, 4, 8], injectMax: 8, learnerPreset: 'qq-chat', workspaceTitle: 'QQ 黑话学习', autoResearch: true },
@@ -367,6 +381,12 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
         switch (path) {
           case '/api/status': return json({ ok: true, dshReady: true, mode: state.mode, role: state.role, roleMode: state.roleMode, closedAgentPreset: state.closedAgentPreset, ownerQQ: state.whitelist.ownerQQ, allowGroups: state.whitelist.allow.groups, allowPrivate: state.whitelist.allow.private, activity: '[08:30:00] 演示桥接已连接\n[08:30:12] group:123456789 · 已处理一条消息\n[08:30:20] 二代社交助手正在运行\n以上均为离线模拟数据。' });
           case '/api/presets': return json({ presets: [{ id: 'qq-chat-v2', trust: 'user' }, { id: 'qq-chat', trust: 'user' }] });
+          case '/api/connection': return json({ ok: true, configPath: 'config.json', ...state.connection });
+          case '/api/connection/secret': {
+            const name = url.searchParams.get('name');
+            if (name !== 'dsh' && name !== 'snowluma') return json({ ok: false, error: 'name 必须是 dsh 或 snowluma' }, 400);
+            return json({ ok: true, name, value: state.connectionSecrets[name] ?? '' });
+          }
           case '/api/roles': return json({
             roles: state.roles.slice(),
             summaries: state.roles.map((name) => {
@@ -472,6 +492,14 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             });
           }
           // 语音库（离线示例：不含任何真实音频路径）
+          case '/api/voice/tts/engines': return json({
+            ok: true,
+            config: { engine: 'auto', maxChars: 500, speed: 1 },
+            engines: [
+              { id: 'sapi', name: '系统语音（Windows SAPI）', description: '离线示例引擎', voices: [{ id: 'Microsoft Huihui Desktop', name: 'Microsoft Huihui Desktop', language: 'ZH' }] },
+              { id: 'melo', name: 'MeloTTS', description: '离线示例引擎', voices: [{ id: 'ZH', name: '中文（ZH）', language: 'ZH' }] },
+            ],
+          });
           case '/api/voice/list':
           case '/api/socialV2/voices': return json({
             ok: true,
@@ -545,6 +573,51 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/dsh/effort': state.dshEffort = body.reasoningEffort; return json({ ok: true, reasoningEffort: body.reasoningEffort });
           case '/api/role-mode': state.roleMode = body.mode; return json({ ok: true });
           case '/api/whitelist': state.whitelist = body; return json({ ok: true });
+          case '/api/connection': {
+            const dsh = body.dsh ?? {};
+            const sl = body.snowluma ?? {};
+            const https = sl.http ?? {};
+            const wss = sl.ws ?? {};
+            const changed = [];
+            const dshUrl = `${dsh.scheme ?? state.connection.dsh.scheme}://${dsh.host ?? state.connection.dsh.host}:${dsh.port ?? state.connection.dsh.port}`;
+            const httpUrl = `${https.scheme ?? state.connection.snowluma.http.scheme}://${https.host ?? state.connection.snowluma.http.host}:${https.port ?? state.connection.snowluma.http.port}`;
+            const wsUrl = `${wss.scheme ?? state.connection.snowluma.ws.scheme}://${wss.host ?? state.connection.snowluma.ws.host}:${wss.port ?? state.connection.snowluma.ws.port}`;
+            if (dshUrl !== state.connection.dsh.url) changed.push('DSH 地址');
+            if (httpUrl !== state.connection.snowluma.httpUrl) changed.push('SnowLuma HTTP 地址');
+            if (wsUrl !== state.connection.snowluma.wsUrl) changed.push('SnowLuma WS 地址');
+            if ('authToken' in dsh && String(dsh.authToken ?? '') !== state.connectionSecrets.dsh) { changed.push('DSH 令牌'); state.connectionSecrets.dsh = String(dsh.authToken ?? ''); }
+            if ('accessToken' in sl && String(sl.accessToken ?? '') !== state.connectionSecrets.snowluma) { changed.push('SnowLuma 令牌'); state.connectionSecrets.snowluma = String(sl.accessToken ?? ''); }
+            const follow = sl.followDiscoveredEndpoint !== false;
+            if (follow !== state.connection.snowluma.followDiscoveredEndpoint) changed.push('跟随自动发现端点');
+            state.connection.dsh = {
+              ...state.connection.dsh,
+              scheme: dsh.scheme ?? state.connection.dsh.scheme,
+              host: dsh.host ?? state.connection.dsh.host,
+              port: Number(dsh.port ?? state.connection.dsh.port),
+              url: dshUrl,
+              allowRemote: dsh.allowRemote === true,
+              tokenSet: Boolean(state.connectionSecrets.dsh),
+            };
+            state.connection.snowluma = {
+              ...state.connection.snowluma,
+              http: { ...state.connection.snowluma.http, ...https, port: Number(https.port ?? state.connection.snowluma.http.port) },
+              ws: { ...state.connection.snowluma.ws, ...wss, port: Number(wss.port ?? state.connection.snowluma.ws.port) },
+              httpUrl,
+              wsUrl,
+              tokenSet: Boolean(state.connectionSecrets.snowluma),
+              followDiscoveredEndpoint: follow,
+            };
+            if (!changed.length) return json({ ok: true, restartRequired: false, changed: [], applied: { dsh: false, snowluma: false, reconnect: { dsh: false, snowluma: false } }, message: '连接配置没有变化' });
+            const dshTouched = changed.some((item) => item.startsWith('DSH'));
+            const slTouched = changed.some((item) => item.startsWith('SnowLuma') || item === '跟随自动发现端点');
+            return json({
+              ok: true,
+              restartRequired: false,
+              changed,
+              applied: { dsh: dshTouched, snowluma: slTouched, reconnect: { dsh: dshTouched, snowluma: slTouched && changed.some((item) => item.startsWith('SnowLuma')) } },
+              message: `已保存并热重载：${changed.join('、')}`,
+            });
+          }
           case '/api/socialV2/config': state.v2 = body; return json({ ok: true });
           case '/api/socialV2/activity': state.paused = body.paused; return json({ ok: true });
           case '/api/socialV2/tool-log/clear': state.toolLog = []; return json({ ok: true });
@@ -571,6 +644,7 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
           case '/api/console/token': return json({ ok: true, token: body.token || 'offline-demo-token-123456', generated: !body.token });
           case '/api/test-send': return json({ ok: true, message_id: 'mock-message-001' });
           // 语音试发（操作者通道）：离线只回执，不产生任何真实 QQ 消息
+          case '/api/voice/tts': return json({ ok: true, file: 'tts-demo.wav', engine: 'sapi', engineName: '系统语音（Windows SAPI）', bytes: 12345, detail: '1秒 · 12.1 KB · pcm_s16le · 22.1kHz · 单声道', warnings: [] });
           case '/api/voice/send': return json(body.dryRun
             ? { ok: true, dryRun: true, target: body.target, file: body.file, detail: '2秒 · 20.0 KB · mp3 · 24.0kHz · 单声道', verified: false }
             : { ok: true, target: body.target, file: body.file, detail: '2秒 · 20.0 KB · mp3', messageId: 9001, verified: true, limits: { maxSeconds: 300, maxBytes: 20971520, maxPerMinute: 2, maxPerHour: 10 } });

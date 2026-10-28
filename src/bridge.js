@@ -23,12 +23,14 @@ import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage, describeAge } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { normalizeImageForModel } from './media-normalize.js';
-import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
+import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, isAudioFile, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary, uniqueLibraryPath } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
+import { launchLibPrograms, prependLibToPath } from './lib-autolaunch.js';
+import { detectTtsEngines, synthesizeSpeech, ttsFileName } from './voice-tts.js';
 import {
   loadSlang,
   saveSlang,
@@ -57,6 +59,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+// 让 lib/ 里的单文件工具（ffmpeg.exe / ffprobe.exe 等）能被直接按名字调用。
+prependLibToPath(process.env, path.join(ROOT, 'lib'));
 const STATE_DIR = path.join(ROOT, 'state');
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
@@ -186,9 +190,57 @@ function atomicWriteJson(file, obj) {
   }
 }
 
+// ── 连接配置（控制台「访问与安全 → 服务连接」）──────────────────────────────
+// 只解析/拼装 origin 级别（协议 + 主机 + 端口）。DSH 的 RPC 路径固定为 /api/*，
+// 所以 baseUrl 里的 path 本来就不参与寻址；SnowLuma 的 OneBot 端点同样以根路径为准。
+function endpointParts(value, { ws = false } = {}) {
+  try {
+    const u = new URL(String(value));
+    const secure = u.protocol === 'https:' || u.protocol === 'wss:';
+    const scheme = ws ? (secure ? 'wss' : 'ws') : (secure ? 'https' : 'http');
+    const port = u.port ? Number(u.port) : (secure ? 443 : 80);
+    return { scheme, host: u.hostname.replace(/^\[|\]$/g, ''), port };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeConnScheme(value, allowed) {
+  const scheme = String(value ?? '').trim().toLowerCase();
+  if (!allowed.includes(scheme)) throw new Error(`协议只能是 ${allowed.join(' / ')}`);
+  return scheme;
+}
+
+function normalizeConnHost(value) {
+  const host = String(value ?? '').trim();
+  if (!host) throw new Error('地址不能为空');
+  if (host.length > 253) throw new Error('地址过长');
+  if (!/^[A-Za-z0-9._:\-\[\]]+$/.test(host)) {
+    throw new Error('地址只能是 IP / 主机名（IPv6 请用方括号，不要带 http:// 或路径）');
+  }
+  return host;
+}
+
+function normalizeConnPort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须是 1-65535 的整数');
+  return port;
+}
+
+function buildConnUrl(scheme, host, port) {
+  const h = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `${scheme}://${h}:${port}`;
+}
+
+/** 密钥只回显首尾，完整值必须显式点「显示当前值」再单独取。 */
+function previewSecret(value) {
+  const s = String(value ?? '');
+  if (!s) return '';
+  return s.length <= 8 ? '••••' : `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
 // 原子写文本文件。
-function atomicWriteText(file, text) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+function atomicWriteText(file, text) {  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
     fs.writeFileSync(tmp, text, { encoding: 'utf8', mode: 0o600 });
@@ -655,6 +707,8 @@ function loadConfig() {
       ...(file.dsh ?? {})
     },
     snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    // lib/ 下的第三方程序：launcher 自动拉起；lib 也会加入 PATH。
+    lib: { autoLaunch: true, ...(file.lib ?? {}) },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'qq-chat',
@@ -698,6 +752,14 @@ function loadConfig() {
       agentPreset: 'qq-chat-v2',
       provideRecommendations: true,
       tools: {
+        status: true,
+        rawApi: true,
+        listGroups: true,
+        groupHistory: true,
+        getGroupMembers: true,
+        webSearch: true,
+        webFetch: true,
+        hostStatus: true,
         getPrompt: true,
         getUnread: true,
         getRecent: true,
@@ -821,6 +883,15 @@ function loadConfig() {
   // socialV2.tools 需要与默认值深度合并：旧 config.json 若缺少新增工具开关，
   // 不能因为外层 spread 覆盖而丢失默认开关。
   cfg.socialV2.tools = {
+    // 通用 / 发送类（关闭后 reserved2 的工具清单与调用都会拒绝）
+    status: true,
+    rawApi: true,
+    listGroups: true,
+    groupHistory: true,
+    getGroupMembers: true,
+    webSearch: true,
+    webFetch: true,
+    hostStatus: true,
     getPrompt: true,
     getUnread: true,
     getRecent: true,
@@ -876,6 +947,21 @@ function loadConfig() {
     ffmpegPath: '',
     autoReadback: true,
     ...(cfg.socialV2?.voice ?? {})
+  };
+  // 语音合成：MeloTTS（lib/MeloTTS 或 PATH）或系统语音（Windows SAPI / say / espeak）。
+  // 合成结果落到同一个语音库，发送路径与手工放入的音频完全一致。
+  const voiceTtsDefaults = {
+    engine: 'auto',
+    meloPath: '',
+    speed: 1,
+    maxChars: 500,
+    timeoutMs: 120000,
+  };
+  cfg.socialV2.voice.tts = {
+    ...voiceTtsDefaults,
+    ...((cfg.socialV2?.voice?.tts && typeof cfg.socialV2.voice.tts === 'object' && !Array.isArray(cfg.socialV2.voice.tts))
+      ? cfg.socialV2.voice.tts
+      : {})
   };
 
   // socialV2.sticker.collect 也需要深度合并，避免旧配置缺失 collect 子项时丢默认值。
@@ -1332,6 +1418,35 @@ async function main() {
   acquireLock();
   loadState();
 
+  // lib/<名称>/launcher.bat 等第三方程序：启动时扫描并拉起；没有就跳过。
+  // SnowLuma 已经在运行时不再重复拉起（避免把用户手动开的实例顶掉）。
+  // .bat/.cmd 走 wscript 隐藏启动（不弹控制台），stdout/stderr 记到 state/logs/lib-<名称>.log。
+  // 每个 launcher 由一个 runner 看门狗看守：本进程退出后 1 秒内 taskkill /T 结束其整棵进程树。
+  if (cfg.lib?.autoLaunch !== false) {
+    const httpBase = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const isGatewayReachable = async () => {
+      // 只要有 HTTP 响应就说明端口上已有服务（401/403 只是 token 不匹配，426 是错把 WS 端口
+      // 当 HTTP 用），都不该再拉起第二个实例。只有连不上才视为未启动。
+      await fetch(`${httpBase}/get_status`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+        },
+        body: '{}',
+        signal: AbortSignal.timeout(1500)
+      });
+      return true;
+    };
+    launchLibPrograms({
+      libDir: path.join(ROOT, 'lib'),
+      logDir: path.join(ROOT, 'state', 'logs'),
+      log,
+      isGatewayReachable
+    })
+      .catch((error) => log(`lib：扫描/拉起失败：${error?.message ?? error}`));
+  }
+
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = [];
   // 读失败时（被占用 / 权限 / JSON 损坏）必须**暂停写入**：否则内存里的空数组
@@ -1510,6 +1625,25 @@ async function main() {
       ffmpegPath: process.env.FFMPEG_PATH || v.ffmpegPath || null,
       autoReadback: v.autoReadback !== false
     };
+  }
+
+  // ── 语音合成（控制台调试面板）：MeloTTS / 系统语音 ─────────────────────────
+  let voiceTtsCache = { at: 0, engines: [] };
+  function ttsCfg() {
+    const raw = cfg.socialV2?.voice?.tts ?? {};
+    return {
+      engine: String(raw.engine ?? 'auto'),
+      meloPath: String(raw.meloPath ?? ''),
+      maxChars: Number(raw.maxChars) > 0 ? Number(raw.maxChars) : 500,
+      timeoutMs: Number(raw.timeoutMs) > 0 ? Number(raw.timeoutMs) : 120000,
+    };
+  }
+  async function getVoiceTtsEngines(force = false) {
+    const now = Date.now();
+    if (!force && voiceTtsCache.engines.length && now - voiceTtsCache.at < 30000) return voiceTtsCache.engines;
+    const engines = await detectTtsEngines({ root: ROOT, meloPath: ttsCfg().meloPath });
+    voiceTtsCache = { at: now, engines };
+    return engines;
   }
 
   function voiceLibrary() {
@@ -2505,6 +2639,9 @@ async function main() {
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
   let dshReady = false;
   let dshCheckStarted = false;
+  // 热重载：保存连接配置后中止当前 mux 流 / 唤醒重连退避，立即用新地址重连。
+  let muxRestart = null;
+  let muxWakeSleep = null;
   let snowlumaWatchStarted = false; // SnowLuma 上游健康探测只启动一次（见 startSnowlumaWatch）
   let currentMode = 'chat'; // chat | closed-agent | reserved2（由 DSH settings / state/mode.json 驱动）
   let lastMode = currentMode;
@@ -2845,6 +2982,8 @@ async function main() {
         dshReady = true;
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
+        // DSH 刚从不可用恢复：如果事件流还在退避等待，立刻唤醒重连。
+        try { muxWakeSleep?.(); } catch {}
         if (currentMode === 'reserved2') {
           // 首次确定模式为 reserved2 后再恢复持久化的有限睡眠定时器，
           // 避免在 initial chat 模式下设置定时器导致 timeout 唤醒被模式守卫吞掉。
@@ -2878,6 +3017,83 @@ async function main() {
       log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待');
     }
   };
+  /**
+   * 连接配置热重载：把控制台保存的新地址/令牌立即应用到运行中的客户端。
+   *
+   * - DSH：替换 api 的 baseUrl/token、清掉旧 Cookie，并中止当前 mux 流，
+   *   让事件流立刻用新地址重连（不用等 5 秒轮询或 30 秒退避）。
+   * - SnowLuma：HTTP 调用本来就每次读 cfg；WS 需要改 bot.url/accessToken 后
+   *   主动 close + connect，才能立刻切到新网关。
+   *
+   * 只做参数替换，不重建 api 对象：`_desiredFollows` 等跨重连状态会保留，
+   * 重连后已有会话仍会重新订阅。
+   */
+  function applyConnectionHotReload({ dsh = null, snowluma = null } = {}) {
+    const applied = { dsh: false, snowluma: false, reconnect: { dsh: false, snowluma: false } };
+    if (dsh) {
+      cfg.dsh.baseUrl = dsh.url;
+      cfg.dsh.authToken = dsh.token;
+      cfg.dsh.authTokenExplicit = Boolean(dsh.token);
+      cfg.dsh.allowRemote = dsh.allowRemote === true;
+      api.baseUrl = dsh.url;
+      api.auth = {
+        token: dsh.token,
+        tokenExplicit: Boolean(dsh.token),
+        header: cfg.dsh.authHeader,
+        prefix: cfg.dsh.authPrefix,
+        allowRemote: dsh.allowRemote === true
+      };
+      api.tokenExplicit = Boolean(dsh.token);
+      // 先清 Cookie/旧策略，再把显式 token 放回去：invalidateAuth 内部会尝试
+      // 从日志发现 token，后赋值保证用户填写的值优先。
+      if (typeof api.invalidateAuth === 'function') api.invalidateAuth();
+      if (dsh.token) api.launchToken = dsh.token;
+      api._preferToken = false;
+      dshReady = false;
+      try { muxRestart?.abort(); } catch {}
+      try { muxWakeSleep?.(); } catch {}
+      log(`控制台：DSH 连接已热更新 → ${dsh.url}（Cookie 已重置，事件流重连中）`);
+      checkDsh().catch((error) => log('DSH 热重载探活失败:', error?.message ?? error));
+      applied.dsh = true;
+      applied.reconnect.dsh = true;
+    }
+    if (snowluma) {
+      const wsChanged = bot.url !== snowluma.wsUrl
+        || (bot.accessToken || undefined) !== (snowluma.token || undefined);
+      cfg.snowluma.httpUrl = snowluma.httpUrl;
+      cfg.snowluma.wsUrl = snowluma.wsUrl;
+      cfg.snowluma.accessToken = snowluma.token;
+      cfg.snowluma.followDiscoveredEndpoint = snowluma.follow !== false;
+      bot.url = snowluma.wsUrl;
+      bot.accessToken = snowluma.token || undefined;
+      snowlumaHealth.connected = false;
+      snowlumaHealth.lastPacketAt = 0;
+      snowlumaHealth.lastPacketKind = '';
+      snowlumaHealth.good = null;
+      snowlumaHealth.goodSource = '';
+      snowlumaHealth.goodCheckedAt = 0;
+      snowlumaHealth.accountOnline = null;
+      snowlumaHealth.degraded = false;
+      snowlumaHealth.reason = '';
+      if (wsChanged && typeof bot.close === 'function' && typeof bot.connect === 'function') {
+        snowlumaConfigReloadAt = Date.now();
+        try { bot.close(1000, 'config-reload'); } catch {}
+        try {
+          const pending = bot.connect();
+          if (pending && typeof pending.catch === 'function') {
+            pending.catch((error) => log(`SnowLuma 热重载重连失败（会继续自动重试）：${error?.message ?? error}`));
+          }
+        } catch (error) {
+          log(`SnowLuma 热重载重连失败（会继续自动重试）：${error?.message ?? error}`);
+        }
+      }
+      log(`控制台：SnowLuma 连接已热更新 → HTTP ${snowluma.httpUrl} / WS ${snowluma.wsUrl}${wsChanged ? '（正在重连）' : ''}`);
+      applied.snowluma = true;
+      applied.reconnect.snowluma = wsChanged;
+    }
+    return applied;
+  }
+
   function startDshWatch() {
     if (dshCheckStarted) return;
     dshCheckStarted = true;
@@ -3111,7 +3327,7 @@ async function main() {
       }
       const SECURITY_HEADERS = {
         'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:",
         'Cache-Control': 'no-store',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer'
@@ -3383,6 +3599,152 @@ async function main() {
             // 属于管理侧观测，不该进 QQ 会话里那个受限的智能体视图。
             snowluma: snowlumaHealthSnapshot(),
             activity: readActivityTail(100)
+          });
+          return;
+        }
+        // ── 服务连接可视化配置（DSH / SnowLuma 地址、端口、令牌）─────────────
+        // 密钥默认只回显首尾；完整值必须显式请求 /api/connection/secret（仍走控制台令牌鉴权）。
+        // 保存后立即热重载到运行中的 api / bot，无需重启桥接。
+        if (req.method === 'GET' && url.pathname === '/api/connection') {
+          const dshUrl = String(cfg.dsh.baseUrl);
+          const httpUrl = String(cfg.snowluma.httpUrl || 'http://127.0.0.1:3000');
+          const wsUrl = String(cfg.snowluma.wsUrl || 'ws://127.0.0.1:3001');
+          const dshToken = cfg.dsh.authToken || '';
+          const slToken = cfg.snowluma.accessToken || '';
+          const allowRemote = cfg.dsh.allowRemote === true;
+          const follow = cfg.snowluma.followDiscoveredEndpoint !== false;
+          const dsh = endpointParts(dshUrl) ?? { scheme: 'http', host: '127.0.0.1', port: 3080 };
+          const http = endpointParts(httpUrl) ?? { scheme: 'http', host: '127.0.0.1', port: 3000 };
+          const ws = endpointParts(wsUrl, { ws: true }) ?? { scheme: 'ws', host: '127.0.0.1', port: 3001 };
+          sendJson({
+            ok: true,
+            configPath: 'config.json',
+            hotReload: true,
+            dsh: {
+              ...dsh,
+              url: dshUrl,
+              tokenSet: Boolean(dshToken),
+              tokenPreview: previewSecret(dshToken),
+              tokenExplicit: Boolean(dshToken),
+              allowRemote,
+              ready: dshReady
+            },
+            snowluma: {
+              http,
+              ws,
+              httpUrl,
+              wsUrl,
+              tokenSet: Boolean(slToken),
+              tokenPreview: previewSecret(slToken),
+              followDiscoveredEndpoint: follow
+            }
+          });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/connection/secret') {
+          const name = String(url.searchParams.get('name') ?? '');
+          if (name !== 'dsh' && name !== 'snowluma') {
+            sendJson({ ok: false, error: 'name 必须是 dsh 或 snowluma' }, 400);
+            return;
+          }
+          const value = name === 'dsh' ? (cfg.dsh.authToken || '') : (cfg.snowluma.accessToken || '');
+          sendJson({ ok: true, name, value });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/connection') {
+          const body = await readBody();
+          const dshBody = (body.dsh && typeof body.dsh === 'object' && !Array.isArray(body.dsh)) ? body.dsh : {};
+          const slBody = (body.snowluma && typeof body.snowluma === 'object' && !Array.isArray(body.snowluma)) ? body.snowluma : {};
+          const httpBody = (slBody.http && typeof slBody.http === 'object' && !Array.isArray(slBody.http)) ? slBody.http : {};
+          const wsBody = (slBody.ws && typeof slBody.ws === 'object' && !Array.isArray(slBody.ws)) ? slBody.ws : {};
+          const baseDshUrl = String(cfg.dsh.baseUrl);
+          const baseHttpUrl = String(cfg.snowluma.httpUrl || 'http://127.0.0.1:3000');
+          const baseWsUrl = String(cfg.snowluma.wsUrl || 'ws://127.0.0.1:3001');
+          const baseDshToken = cfg.dsh.authToken || '';
+          const baseSlToken = cfg.snowluma.accessToken || '';
+          const baseAllowRemote = cfg.dsh.allowRemote === true;
+          const baseFollow = cfg.snowluma.followDiscoveredEndpoint !== false;
+          let dshUrl;
+          let httpUrl;
+          let wsUrl;
+          try {
+            const curDsh = endpointParts(baseDshUrl) ?? { scheme: 'http', host: '127.0.0.1', port: 3080 };
+            const curHttp = endpointParts(baseHttpUrl) ?? { scheme: 'http', host: '127.0.0.1', port: 3000 };
+            const curWs = endpointParts(baseWsUrl, { ws: true }) ?? { scheme: 'ws', host: '127.0.0.1', port: 3001 };
+            dshUrl = buildConnUrl(
+              normalizeConnScheme(dshBody.scheme ?? curDsh.scheme, ['http', 'https']),
+              normalizeConnHost(dshBody.host ?? curDsh.host),
+              normalizeConnPort(dshBody.port ?? curDsh.port)
+            );
+            httpUrl = buildConnUrl(
+              normalizeConnScheme(httpBody.scheme ?? curHttp.scheme, ['http', 'https']),
+              normalizeConnHost(httpBody.host ?? curHttp.host),
+              normalizeConnPort(httpBody.port ?? curHttp.port)
+            );
+            wsUrl = buildConnUrl(
+              normalizeConnScheme(wsBody.scheme ?? curWs.scheme, ['ws', 'wss']),
+              normalizeConnHost(wsBody.host ?? curWs.host),
+              normalizeConnPort(wsBody.port ?? curWs.port)
+            );
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? '连接参数不合法' }, 400);
+            return;
+          }
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readConfigObject(configFile);
+          const dshFile = { ...(file.dsh && typeof file.dsh === 'object' && !Array.isArray(file.dsh) ? file.dsh : {}) };
+          const slFile = { ...(file.snowluma && typeof file.snowluma === 'object' && !Array.isArray(file.snowluma) ? file.snowluma : {}) };
+          const wantToken = (raw) => {
+            const token = String(raw ?? '').trim();
+            if (token.length > 4096) throw new Error('过长（最多 4096 字符）');
+            if (/[\r\n\u0000]/.test(token)) throw new Error('不能包含换行或控制字符');
+            return token;
+          };
+          let nextDshToken = baseDshToken;
+          let nextSlToken = baseSlToken;
+          let nextAllowRemote = baseAllowRemote;
+          let nextFollow = baseFollow;
+          try {
+            if (Object.prototype.hasOwnProperty.call(dshBody, 'authToken')) nextDshToken = wantToken(dshBody.authToken);
+            if (Object.prototype.hasOwnProperty.call(slBody, 'accessToken')) nextSlToken = wantToken(slBody.accessToken);
+            if (Object.prototype.hasOwnProperty.call(dshBody, 'allowRemote')) nextAllowRemote = dshBody.allowRemote === true;
+            if (Object.prototype.hasOwnProperty.call(slBody, 'followDiscoveredEndpoint')) nextFollow = slBody.followDiscoveredEndpoint !== false;
+          } catch (error) {
+            sendJson({ ok: false, error: `令牌${error?.message ?? '不合法'}` }, 400);
+            return;
+          }
+          const changes = [];
+          if (baseDshUrl !== dshUrl) { dshFile.baseUrl = dshUrl; changes.push('DSH 地址'); }
+          if (baseDshToken !== nextDshToken) { dshFile.authToken = nextDshToken; changes.push('DSH 令牌'); }
+          if (baseAllowRemote !== nextAllowRemote) { dshFile.allowRemote = nextAllowRemote; changes.push('DSH 远程令牌开关'); }
+          if (baseHttpUrl !== httpUrl) { slFile.httpUrl = httpUrl; changes.push('SnowLuma HTTP 地址'); }
+          if (baseWsUrl !== wsUrl) { slFile.wsUrl = wsUrl; changes.push('SnowLuma WS 地址'); }
+          if (baseSlToken !== nextSlToken) { slFile.accessToken = nextSlToken; changes.push('SnowLuma 令牌'); }
+          if (baseFollow !== nextFollow) { slFile.followDiscoveredEndpoint = nextFollow; changes.push('跟随自动发现端点'); }
+          if (!changes.length) {
+            sendJson({ ok: true, restartRequired: false, changed: [], applied: { dsh: false, snowluma: false }, message: '连接配置没有变化' });
+            return;
+          }
+          file.dsh = dshFile;
+          file.snowluma = slFile;
+          atomicWriteJson(configFile, file);
+          const dshChanged = baseDshUrl !== dshUrl || baseDshToken !== nextDshToken || baseAllowRemote !== nextAllowRemote;
+          const slChanged = baseHttpUrl !== httpUrl || baseWsUrl !== wsUrl || baseSlToken !== nextSlToken || baseFollow !== nextFollow;
+          const applied = applyConnectionHotReload({
+            dsh: dshChanged ? { url: dshUrl, token: nextDshToken, allowRemote: nextAllowRemote } : null,
+            snowluma: slChanged
+              ? { httpUrl, wsUrl, token: nextSlToken, follow: nextFollow }
+              : null
+          });
+          log(`控制台：连接配置已更新并热重载（${changes.join('、')}）`);
+          sendJson({
+            ok: true,
+            restartRequired: false,
+            changed: changes,
+            applied,
+            dsh: { url: dshUrl },
+            snowluma: { httpUrl, wsUrl },
+            message: `已保存并热重载：${changes.join('、')}`
           });
           return;
         }
@@ -4333,7 +4695,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['status', 'rawApi', 'listGroups', 'groupHistory', 'getGroupMembers', 'webSearch', 'webFetch', 'hostStatus', 'getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -4566,6 +4928,14 @@ async function main() {
           }
           const roleState = readRoleState();
           const toolMap = {
+            status: 'qq_status',
+            rawApi: 'qq_api / qq_api_help',
+            listGroups: currentMode === 'reserved2' ? '' : 'qq_list_groups',
+            groupHistory: currentMode === 'reserved2' ? '' : 'qq_get_group_history',
+            getGroupMembers: 'qq_get_group_members',
+            webSearch: 'mcp__web-search-safe__web_search',
+            webFetch: 'mcp__web-search-safe__web_fetch',
+            hostStatus: 'mcp__snowluma-host__snowluma_status',
             getPrompt: 'qq_get_prompt',
             getUnread: 'qq_get_unread_messages',
             getRecent: 'qq_get_recent_messages',
@@ -4601,6 +4971,7 @@ async function main() {
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
           const enabledTools = [];
           for (const [flag, name] of Object.entries(toolMap)) {
+            if (!name) continue;
             if (tools[flag] !== false && !(stickerToolFlags.has(flag) && !stickerEnabled())) enabledTools.push(name);
           }
           sendJson({
@@ -5451,6 +5822,108 @@ async function main() {
           } catch (error) {
             sendJson({ ok: false, error: `修改备注失败：${error?.message ?? error}` }, 500);
           }
+          return;
+        }
+        // ── 语音合成（操作者：控制台 / 调试面板）──────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/voice/tts/engines') {
+          try {
+            const engines = await getVoiceTtsEngines(url.searchParams.get('refresh') === '1');
+            sendJson({ ok: true, config: ttsCfg(), engines });
+          } catch (error) {
+            sendJson({ ok: false, error: `检测语音合成引擎失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/voice/tts') {
+          const body = await readBody();
+          const voice = voiceCfg();
+          const tts = ttsCfg();
+          const text = String(body.text ?? '');
+          if (!text.trim()) { sendJson({ ok: false, error: '合成文本不能为空' }, 400); return; }
+          if (text.length > tts.maxChars) { sendJson({ ok: false, error: `合成文本不能超过 ${tts.maxChars} 字` }, 400); return; }
+          let engines = [];
+          try { engines = await getVoiceTtsEngines(); }
+          catch (error) { sendJson({ ok: false, error: `检测语音合成引擎失败：${error?.message ?? error}` }, 500); return; }
+          if (!engines.length) {
+            sendJson({ ok: false, error: '没有可用的语音合成引擎：请安装 MeloTTS（lib/MeloTTS 或 PATH 中的 melo），或使用 Windows 自带系统语音' }, 400);
+            return;
+          }
+          const requested = String(body.engine || tts.engine || 'auto');
+          const engine = requested === 'auto' ? engines[0] : engines.find((item) => item.id === requested);
+          if (!engine) { sendJson({ ok: false, error: `合成引擎不可用：${requested}` }, 400); return; }
+          const voiceId = String(body.voice ?? '').trim();
+          const voiceEntry = engine.voices.find((item) => item.id === voiceId);
+          let name = String(body.name ?? '').trim();
+          name = name ? path.basename(name.replace(/\\/g, '/')).replace(/[<>:"|?*\u0000-\u001f]/g, '_').trim() : '';
+          if (name && !/\.wav$/i.test(name)) name = `${name.replace(/\.[^.]+$/, '')}.wav`;
+          if (!name) name = ttsFileName();
+          if (name.length > 120) name = `${name.slice(0, 116)}.wav`;
+          fs.mkdirSync(voice.dir, { recursive: true });
+          const outputPath = uniqueLibraryPath(voice.dir, name);
+          try {
+            const synth = await synthesizeSpeech({
+              text,
+              engine: engine.id,
+              voice: voiceId,
+              language: body.language ?? voiceEntry?.language ?? '',
+              speed: body.speed ?? 1,
+              outputPath,
+              root: ROOT,
+              meloPath: tts.meloPath,
+              maxChars: tts.maxChars,
+              timeoutMs: tts.timeoutMs,
+            });
+            const probe = await inspectAudio(outputPath, {
+              maxBytes: voice.maxBytes,
+              maxSeconds: voice.maxSeconds,
+              ffprobePath: process.env.FFPROBE_PATH || 'ffprobe'
+            });
+            if (!probe.ok) {
+              try { fs.unlinkSync(outputPath); } catch {}
+              sendJson({ ok: false, error: probe.error || '合成出的音频未通过校验' }, 400);
+              return;
+            }
+            const file = path.relative(voice.dir, outputPath).split(path.sep).join('/');
+            log(`[voice] (控制台) 已用 ${engine.name} 合成语音 ${file}（${synth.bytes} 字节）`);
+            appendActivity(`[voice] 控制台合成语音 ${file}（${engine.name}）`);
+            sendJson({
+              ok: true,
+              file,
+              engine: engine.id,
+              engineName: engine.name,
+              bytes: synth.bytes,
+              detail: describeAudio(probe),
+              warnings: probe.warnings ?? []
+            });
+          } catch (error) {
+            try { fs.unlinkSync(outputPath); } catch {}
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+          }
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/voice/preview') {
+          const voice = voiceCfg();
+          const rel = String(url.searchParams.get('file') ?? '').trim();
+          const abs = rel ? safeJoinLibrary(voice.dir, rel) : null;
+          if (!abs || !fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+            sendJson({ ok: false, error: '找不到该语音文件' }, 404);
+            return;
+          }
+          if (!isAudioFile(abs)) { sendJson({ ok: false, error: '不是音频文件' }, 400); return; }
+          const ext = path.extname(abs).toLowerCase();
+          const mime = {
+            '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.oga': 'audio/ogg',
+            '.opus': 'audio/ogg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
+            '.amr': 'audio/amr', '.wma': 'audio/x-ms-wma', '.spx': 'audio/ogg'
+          }[ext] || 'application/octet-stream';
+          const stat = fs.statSync(abs);
+          res.writeHead(200, {
+            'content-type': mime,
+            'content-length': stat.size,
+            'cache-control': 'no-store',
+            ...SECURITY_HEADERS
+          });
+          fs.createReadStream(abs).pipe(res);
           return;
         }
         // ── 语音发送（操作者通道：CLI / 控制台，凭 consoleToken） ──────────────
@@ -10752,11 +11225,18 @@ async function main() {
     // 固定 3 秒重连会以每分钟 20 行的速度刷屏，真正有用的错误反而被淹没。
     let retryMs = 3000;
     let failureStreak = 0;
+    const abortableSleep = (ms) => new Promise((resolve) => {
+      const timer = setTimeout(() => { muxWakeSleep = null; resolve(); }, ms);
+      muxWakeSleep = () => { clearTimeout(timer); muxWakeSleep = null; resolve(); };
+    });
     for (;;) {
       let framesThisStream = 0;
+      const controller = new AbortController();
+      muxRestart = controller;
+      let aborted = false;
       try {
         log('连接 DSH 事件流…');
-        for await (const envelope of api.events.mux({})) {
+        for await (const envelope of api.events.mux({}, controller.signal)) {
           framesThisStream += 1;
           const frame = envelope.payload;
           // 会话开场快照：只喂 token 账本。它含**历史** turn/end，绝不能让它们走
@@ -11058,8 +11538,11 @@ async function main() {
         // 就像「连上了、然后又连一次」，完全看不出 DSH 把流关了。
         log(`DSH 事件流已结束（本次收到 ${framesThisStream} 帧）`);
       } catch (error) {
-        log('事件流中断:', error?.message ?? error);
+        aborted = controller.signal.aborted;
+        if (aborted) log('DSH 连接配置已更新，正在重连事件流…');
+        else log('事件流中断:', error?.message ?? error);
       } finally {
+        if (muxRestart === controller) muxRestart = null;
         // WebSocket 正常关闭和异常中断都会走到这里；必须清掉旧 turn 相关状态，
         // 否则重连后旧 collector/标记残留会导致回复重复累加或误判。
         collectors.clear(); // 清除旧 turn collector，避免重连后残留导致重复累加
@@ -11077,6 +11560,12 @@ async function main() {
         // 断开时不一定触发，残留租约会用 429 卡住该会话最长 15 分钟的等待工具。
         activeWaits.clear();
       }
+      if (aborted) {
+        // 热重载：不等待退避，立刻用新 baseUrl/token 重连。
+        failureStreak = 0;
+        retryMs = 3000;
+        continue;
+      }
       if (framesThisStream > 0) {
         failureStreak = 0;
         retryMs = 3000;
@@ -11088,7 +11577,7 @@ async function main() {
             + '（可在 DSH 里核对版本，或查看 issue #34）。已改为指数退避重连，不再每 3 秒刷屏。');
         }
       }
-      await sleep(retryMs);
+      await abortableSleep(retryMs);
     }
   }
 
@@ -11259,6 +11748,11 @@ async function main() {
   }
 
   let tokenHealAt = 0;
+  // 控制台刚热重载 SnowLuma 配置时，主动 close 会触发 close/error 自愈；
+  // 自愈会把「发现到的端点」写回 config，可能覆盖用户刚手动填的地址。
+  // 这段时间内跳过自愈；若新端点确实连不上，SDK 后续重试的 close 会超过窗口、正常自愈。
+  let snowlumaConfigReloadAt = 0;
+  const skipHealAfterConfigReload = () => Date.now() - snowlumaConfigReloadAt < 3000;
   async function healTokenIfStale(reason) {
     const now = Date.now();
     if (now - tokenHealAt < 10000) return;   // 节流：close 事件会连续触发
@@ -11282,7 +11776,8 @@ async function main() {
     // 连不上时最常见的原因就是换了 QQ 账号 → token 变了；顺手自愈。
     // 注意 1006 在**每次启动**都可能出现一次：HTTP token 与 WS token 是两个不同的值，
     // config.json 里存的是前者，WS 需要用自愈发现的那个（详见 bot.connect() 处的说明）。
-    void healTokenIfStale(`close code=${info?.code ?? '?'}`);
+    if (skipHealAfterConfigReload()) log('（刚热重载 SnowLuma 配置，跳过本次 token 自愈，避免覆盖手动填写的端点）');
+    else void healTokenIfStale(`close code=${info?.code ?? '?'}`);
   });
   bot.on('error', (error) => {
     // SDK 在 WS 升级被拒（401 / 建连失败）时可能**只 emit error、不 emit close**，
@@ -11292,7 +11787,8 @@ async function main() {
       ? [error.code, error.message, error.reason, error.type].filter(Boolean).join(' | ') || JSON.stringify(error)
       : String(error ?? '');
     log(`SnowLuma 错误：${detail || '(无详情)'}`);
-    void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
+    if (skipHealAfterConfigReload()) log('（刚热重载 SnowLuma 配置，跳过本次 token 自愈，避免覆盖手动填写的端点）');
+    else void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
   });
 
   // SnowLuma 尚未就绪时不阻塞桥接启动：SDK 自带后台重连，DSH 侧照常连接。

@@ -64,10 +64,10 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **agent 自主收发 QQ**：DSH 的 MCP 客户端（`~/.dsh/profiles/web/cordis.patch.yml` 配置）接入三个 MCP server：
   - `snowluma`（桥接自带 `src/mcp-snowluma-safe.js`）：QQ 动作**安全子集**（查状态/查群/查消息/发消息，发送强制白名单；发送工具支持可选 `replyToMessageId` 引用回复）
   - `snowluma-host`（桥接自带 `src/mcp-host-server.js`）：**只有** `snowluma_status`（只读探活 `get_login_info`）。
-    ⚠️ **v0.1.5 起移除了 `start_snowluma` / `stop_snowluma`**（以及 `snowluma.allowProcessControl` 配置项）——
-    原因是 **SnowLuma EULA §5.4** 规定「将其并入第三方安装包或 Docker 镜像、**通过自动化脚本部署**」
-    须事先取得书面授权，而原生组件属专有组件。本程序**只探测、不部署**：SnowLuma 的安装、启动与扫码
-    始终由你自己完成（详见 [LICENSE](LICENSE) 与 [RULES.md](RULES.md)）。
+    ⚠️ **MCP 侧的 `start_snowluma` / `stop_snowluma` 已移除**（以及 `snowluma.allowProcessControl` 配置项）——
+    原因是 SnowLuma EULA §5.4 对「通过自动化脚本部署」有书面授权要求，且不宜把进程控制交给群里的模型。
+    安装、扫码登录与是否启动仍由你负责；桥接只会在启动时扫描**你自己放好的** `lib/<名称>/launcher.*`（也认 `launch.*` / `start.*` / `run.*` / 与目录同名的脚本）并尝试拉起
+    （见下方「lib 目录」，可用 `config.lib.autoLaunch: false` 关闭），不安装、不复制、不下载。
   - `web-search-safe`（桥接自带 `src/mcp-web-search-safe.js`）：只读 `web_search` / `web_fetch`（带 SSRF 防护），供 agent 查网络用语/资料。
     **搜索优先复用 DSH 原本的联网搜索**（同一个 DeepSeek Anthropic 兼容端点 + `web_search` 服务端工具，凭据按 `config.webSearch.apiKey` → 环境变量 `DEEPSEEK_API_KEY` → DSH 的 `.credentials.yaml` 顺序解析），
     因而结果质量与 DSH 内的搜索一致、且**不再默认把群聊关键词发给 Bing**（Bing RSS 只在 DeepSeek 不可用时兜底）。
@@ -81,6 +81,7 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - **两层提示词可分别查看与修改**：「仿真提示词」（预设内置，管行为与协议，保存后同步到 DSH，需重启生效）与「人格提示词」（`roles/*.md`，管人设与语气，保存即生效）；仿真层保存前做安全不变量校验与自动备份，可一键还原
   - **会话初始提示词**（二代仿真）：「二代仿真 → 初始提示词」里可以给某个群/私聊预写一段环境说明（圈子主题、群内氛围、常见话题、忌讳），AI **只在该会话第一次唤醒时收到一次**（之后已在会话上下文里，不再重复注入）。可在群还没说过话时提前写；AI 既读不到也改不了这份设置（仅控制台接口）。会话被重置（「会话映射」里的重置或「重置二代状态」）后，下一次首次唤醒会重新带上它。字数上限见 `socialV2.initialPromptMaxChars`
   - **DSH 模型选择与思考强度**：控制台「DSH 模型与思考强度」会从 DSH 的 `session/modelCatalog` 读取**提供方与模型列表**，可手动下拉切换并保存到 `config.json`；切换同时写入 DSH 全局默认（`~/.dsh/settings.yaml` 的 `agent-default-model`），对已有 QQ 会话在下一条消息生效。思考强度默认 `max`，档位同样取自 DSH 实际公布的能力
+  - **服务连接可视化配置**：控制台「访问与安全 → 服务连接」可直接编辑 DSH 的协议/地址/端口/`dsh.authToken`、SnowLuma 的 HTTP 与 WS 地址/端口/`snowluma.accessToken`，以及是否跟随 SnowLuma 自动发现端点。密钥默认只显示首尾（点「显示当前值」才取完整值，接口仅控制台可用）；保存会原子写入 `config.json` 并**立即热重载**：DSH 会重置 Cookie 并立刻重连事件流，SnowLuma 会重连 WebSocket，HTTP 调用下一次请求即使用新配置，无需重启桥接（仍保留「保存并重启桥接」按钮作为兜底）
 - **运行模式**：
   - `chat`：白名单群 + 白名单私聊 → qq-chat 安全聊天
   - `closed-agent`：仅私聊 owner（config.json 的 ownerQQ，可在控制台设置）→ 完整工具（默认用 DSH 自己声明的默认 preset，即 `standard`；可在控制台「closed-agent preset」下拉改为任意 DSH preset），可在 QQ 上操控 DSH
@@ -93,7 +94,9 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - 群聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 判断这句话是对谁说的，不会把群友之间引用第三方的对话误当成指向自己；引用机器人自己时会被视为必回
   - **图片/表情（含动图 GIF）**：表情包优先走 QQ 的 CDN 直链，`get_image` 失败时用 `emoji_id` 推出 CDN 地址兜底；媒体元数据保留 `emoji_id`/`summary`/`sub_type` 等字段。下载走同一套 SSRF 防护传输，并修掉了「DNS 先返回 IPv6、本机没有 IPv6 出口 → 每次白等 20 秒」的根因（改为 **IPv4 优先 + 逐地址故障切换**），动图表情不再时好时坏。单条消息上限默认 8MB / 64MP / 5 张（`socialV2.media`）
   - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具：AI 可以先用 `qq_get_group_history` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
-  - **MCP 全量 API**：`mcp__snowluma__qq_api` 可调用 SnowLuma 文档中的全部 190 个 OneBot v11 动作（action + params），`qq_api_help` 可查动作名/参数；⚠️ 包含禁言、踢人、撤回、文件、QQ 空间、凭据读取等管理/敏感动作，且绕过桥接发送白名单；不需要时把 `config.json` 的 `snowluma.mcp.rawApi` 设为 `false` 并重启 DSH
+  - **MCP 全量 API**：`mcp__snowluma__qq_api` 可调用 SnowLuma 文档中的全部 190 个 OneBot v11 动作（action + params），`qq_api_help` 可查动作名/参数；⚠️ 包含禁言、踢人、撤回、文件、QQ 空间、凭据读取等管理/敏感动作，且绕过桥接发送白名单；不需要时把 `config.json` 的 `snowluma.mcp.rawApi` 设为 `false` 并重启 DSH。控制台「二代仿真 → 工具开关」现在覆盖全部 MCP 工具（QQ / 联网搜索 / SnowLuma 探活），可逐个启停
+  - **语音合成**：控制台「语音库、语音合成与发送」可用 **MeloTTS**（把 MeloTTS 装进 `lib/MeloTTS/`，或让 `melo` 在 PATH 中）或 **系统语音**（Windows SAPI / macOS `say` / Linux `espeak-ng`）把文字合成到语音库，支持音色、语速、试听，之后与手工放入的音频走同一条发送/校验/限流路径
+- **`lib/` 目录**：把第三方程序放到 `lib/<名称>/`，启动脚本命名为 `launcher.bat` / `launcher.cmd` / `launcher.exe`（也认 `launch.*`、`start.*`、`run.*` 和与目录同名的脚本，例如 `lib/Foo/Foo.cmd`），桥接启动时扫描并自动拉起；没有就跳过，SnowLuma 网关已在线时不会重复拉起。`.bat` / `.cmd` 通过 `wscript` 以隐藏窗口启动（**不弹额外的 cmd 窗口**），并由 runner 看门狗监视桥接进程：**关闭 start.bat 窗口 / 桥接崩溃 / Ctrl+C 后，1 秒内用 `taskkill /T /F` 结束这些程序及其全部子孙进程**。stdin 接 NUL，launcher 里的 `pause` / `set /p` 不会卡住，输出记录到 `state/logs/lib-<名称>.log`。`lib/` 会自动加入 PATH，`lib/ffmpeg.exe`、`lib/ffprobe.exe` 等单文件工具可直接按名字调用。用 `config.lib.autoLaunch: false` 可关闭自动拉起
 
 ## 前置条件
 
@@ -124,7 +127,8 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `snowluma.accessToken` | OneBot accessToken，未配置留空 |
 | `snowluma.followDiscoveredEndpoint` | 默认 `true`。换 QQ 账号后 token 与端口都会变，桥接会自愈：重新发现并**跟随** SnowLuma 的端点（同时写回 `config.json`）。**想跑第二个实例 / 指向另一份 SnowLuma 安装（多账号、测试）时设为 `false`** —— 那时只自愈 token，绝不动 URL，也不写回 URL。详见「已知行为」 |
 | `snowluma.silenceWarnMs` | 上游静默告警阈值（毫秒），默认 `600000`（10 分钟）。已连接但这么久没收到任何事件包（含心跳）时打警告；这只是**提示**，不确定性的判断交给 `good` |
-| `snowluma.launcherPath` / `homeDir` | SnowLuma 安装目录（用于 token/端点自发现）。⚠️ 桥接**不会**启动或停止 SnowLuma（见 `LICENSE`） |
+| `snowluma.launcherPath` / `homeDir` | SnowLuma 安装目录（用于 token/端点自发现）。桥接启动时会尝试拉起 `lib/SnowLuma/launcher.bat`（若存在），但**不会**安装或复制 SnowLuma |
+| `lib.autoLaunch` | 默认 `true`。启动时扫描 `lib/<名称>/` 下的 `launcher` / `launch` / `start` / `run`（`.bat`、`.cmd`、`.exe`，或与目录同名的脚本）并以独立进程拉起；没有就跳过；SnowLuma 网关已在线时不重复拉起。`.bat` / `.cmd` 隐藏窗口启动，输出写入 `state/logs/lib-<名称>.log`；桥接进程退出后这些程序会被看门狗整棵树结束。设为 `false` 可完全关闭。`lib/` 本身会自动加入 PATH，放在里面的 `ffmpeg.exe` 等单文件工具可直接按名字调用 |
 | `agentPreset` | QQ 会话使用的 DSH agent preset，默认 `qq-chat`（改性格见下文） |
 | `socialV2.agentPreset` | `reserved2` 模式使用的 DSH agent preset，默认 `qq-chat-v2` |
 | `socialV2.initialPromptMaxChars` | 会话「初始提示词」（控制台为某个群/私聊预写的环境说明）的字数上限，默认 2000，允许 100~8000。越界值会在启动时收敛并保持原文件不动 |
@@ -268,6 +272,7 @@ qq-bridge/
     audits/             # 审查与优化报告（体检、控制台、token）
     legacy/             # 历史归档（已被取代或问题已全部修复的旧报告）
   audio/                # 语音库：把准备好的音频放这里，可作 QQ 语音发出（用法见 docs/README.md 文档索引）
+  lib/                  # 第三方程序：<名称>/launcher|start|run.* 启动时隐藏拉起；目录本身加入 PATH
   dsh/agent-presets/    # qq-chat / qq-chat-v2 的 DSH agent preset 模板
   plugins/qq-mode-console  # DSH 插件：注册 qq-mode 设置命名空间（仅 host 半，UI 卡片未实现）
   src/

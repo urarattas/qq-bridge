@@ -333,6 +333,27 @@ async function legacyReadToolAllowed() {
 
 const server = new McpServer({ name: 'snowluma-safe', version: '0.2.1-r1' });
 
+// ── 启动时的桥接模式（注册期过滤要用，必须先算出来）─────────────────────────
+//
+// 读 `state/mode.json` 而**不**去问 `/api/status`：注册发生在模块加载期，走网络就得用
+// top-level await；而本文件会被若干离线回归（test-audit-security-mcp.mjs）用 `vm`/
+// `new Function` 求值，那里没有 TLA，会直接 ReferenceError。模式文件由桥接切换模式时
+// 原子写出，与 /api/status 同源，读盘既准确又是同步的。
+//
+// 旧只读工具（qq_list_groups / qq_get_group_history）没有会话令牌，只在 closed-agent
+// 下注册才有意义；探测失败时按「注册」处理（少注册只会让模型看到更少的失败路径）。
+const bootBridgeMode = (() => {
+  try {
+    const raw = fs.readFileSync(path.join(ROOT, 'state', 'mode.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    return String(parsed?.mode ?? '').trim();
+  } catch { return ''; }
+})();
+const registerLegacyReadTools = bootBridgeMode === '' || bootBridgeMode === 'closed-agent';
+if (!registerLegacyReadTools) {
+  console.error(`[snowluma-safe] 当前桥接模式 ${bootBridgeMode}：不注册旧只读工具（qq_list_groups / qq_get_group_history），改用带令牌的 v2 读工具`);
+}
+
 // ── 工具开关必须在**注册期**生效，而不是只在校验期 ──────────────────────────
 //
 // 为什么：每个工具的描述 + 参数 schema 都会随 system prompt 在**每一次**请求里重发
@@ -342,10 +363,21 @@ const server = new McpServer({ name: 'snowluma-safe', version: '0.2.1-r1' });
 // 这里用一个注册过滤器统一处理：开关关闭 ⇒ 该工具根本不注册 ⇒ 既省 token 又不给模型误调的机会。
 // DSH 在启动时读取工具清单，所以关掉/打开后需要重启 DSH 才会刷新（控制台面板已注明）。
 //
-// 只列**各模式共用的工具不在其中**：qq_send_group_message / qq_send_private_message / qq_reply
-// 同时服务 chat / reserved / closed-agent 模式，用 v2 的开关去决定它们是否注册会误伤其它模式，
-// 所以这三个仍然只在调用时由桥接校验。
+// 各模式共用的发送工具（qq_send_group_message / qq_send_private_message / qq_reply）
+// 也登记在这里：它们只在 **reserved2** 下受 v2 开关控制，chat / closed-agent 不受影响。
+// 两个旧只读工具（qq_list_groups / qq_get_group_history）只在 closed-agent 注册，
+// 因此它们的开关在 closed-agent 下同样生效（否则控制台里的勾选毫无意义）。
 const TOOL_CONFIG_FLAGS = {
+  // 通用/发送类工具：默认 true；在 reserved2 下关闭后同样从工具清单消失。
+  qq_status: 'status',
+  qq_api: 'rawApi',
+  qq_api_help: 'rawApi',
+  qq_list_groups: 'listGroups',
+  qq_get_group_members: 'getGroupMembers',
+  qq_get_group_history: 'groupHistory',
+  qq_send_group_message: 'sendGroup',
+  qq_reply: 'reply',
+  qq_send_private_message: 'sendPrivate',
   qq_get_prompt: 'getPrompt',
   qq_get_unread_messages: 'getUnread',
   qq_get_recent_messages: 'getRecent',
@@ -389,7 +421,12 @@ const disabledTools = [];
   const registerTool = server.tool.bind(server);
   server.tool = (name, ...rest) => {
     const flag = TOOL_CONFIG_FLAGS[name];
-    if (flag && cfg.socialV2?.tools?.[flag] === false) {
+    // 这些开关属于 reserved2 控制台；其它模式（chat / closed-agent）里同名工具还有用，
+    // 不能被 v2 的控制台设置误伤。例外是两个旧只读工具：它们**只**在 closed-agent 注册，
+    // 所以开关必须在 closed-agent 下也生效，否则控制台里的勾选没有任何意义。
+    const applies = bootBridgeMode === 'reserved2'
+      || (bootBridgeMode === 'closed-agent' && (flag === 'listGroups' || flag === 'groupHistory'));
+    if (flag && applies && cfg.socialV2?.tools?.[flag] === false) {
       disabledTools.push(`${name}(${flag})`);
       return undefined;
     }
@@ -475,35 +512,7 @@ if (cfg.snowluma?.mcp?.rawApi !== false) {
   );
 }
 
-// ── 旧只读工具：**按启动时的桥接模式决定是否注册** ─────────────────────────
-//
-// 为什么必须在注册期就砍掉（而不是只在调用期 403）：
-//   每个工具的描述 + 参数 schema 都随 system prompt 在**每一次**请求里重发。
-//   实测一份 reserved2 会话的请求头是「58 个工具 / 45.5 KB schema（≈14k token/次）」，
-//   其中 3 个旧只读工具在 reserved2 下**必然**返回 403，却照样占着 2500+ 字节；
-//   更要命的是它们会诱导模型误调（实测 turn10 有一次 qq_get_group_members → 403，白烧一步）。
-//   本文件开头（TOOL_CONFIG_FLAGS 那段）已经为「关掉的工具」立过同样的规矩，这里补齐模式维度。
-//
-// 语义：旧只读工具没有会话令牌，`legacyReadToolAllowed()` 只放行 closed-agent。
-//   所以只有在 closed-agent 下注册它们才有意义。探测失败（读不到状态文件）时按「注册」处理：
-//   那种情况下所有 QQ 工具都不可用，少注册只会让模型看到更少的失败路径，不必激进。
-//
-// ⚠️ 为什么读 `state/mode.json` 而**不**去问 `/api/status`：
-//   注册发生在模块加载期，走网络就得用 top-level await；而本文件会被若干离线回归
-//   （test-audit-security-mcp.mjs）用 `vm`/`new Function` 求值，那里没有 TLA —— 会直接
-//   `ReferenceError: await is not defined`，把整批断言打红。模式文件是桥接每次切换模式时
-//   原子写出的（bridge.js 的 writeMode），与 `/api/status` 同源，读盘既准确又是同步的。
-const bootBridgeMode = (() => {
-  try {
-    const raw = fs.readFileSync(path.join(ROOT, 'state', 'mode.json'), 'utf8');
-    const parsed = JSON.parse(raw);
-    return String(parsed?.mode ?? '').trim();
-  } catch { return ''; }
-})();
-const registerLegacyReadTools = bootBridgeMode === '' || bootBridgeMode === 'closed-agent';
-if (!registerLegacyReadTools) {
-  console.error(`[snowluma-safe] 当前桥接模式 ${bootBridgeMode}：不注册旧只读工具（qq_list_groups / qq_get_group_history），改用带令牌的 v2 读工具`);
-}
+// ── 旧只读工具：注册期已按上面的 bootBridgeMode 决定 ───────────────────────
 
 if (registerLegacyReadTools) {
 server.tool(
