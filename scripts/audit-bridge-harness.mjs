@@ -42,7 +42,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
   }
-  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [] };
+  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], requests: [] };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
   // 所以这里给 VM 注入一个记录型 fetch：既不让测试真的发 QQ 消息，又能断言发出的段内容。
   const fakeFetch = async (url, init = {}) => {
@@ -110,6 +110,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     }
     async fetchFaceEntity(id) { calls.faces.push(id); return null; }
     async request(action, params = {}) {
+      calls.requests.push({ action, params });
       // 群成员列表：v2 读工具 qq_get_group_members 会用到（含 WS 不可用时的 HTTP 兜底路径）。
       if (action === 'get_group_member_list') {
         return {
@@ -147,6 +148,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   return {
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
     sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
+    handleRequestEvent, decideAddRequest, requestStore,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     buildWakePromptV2, buildWakeSnapshotV2, sendWakePromptV2, socialV2,
     syncStickerLibrary, listStickersForV2, getStickerImageData,

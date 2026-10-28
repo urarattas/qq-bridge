@@ -57,6 +57,16 @@ ok(new Set(tools).size === tools.length, '工具开关无重复');
   ok(unmapped.length === 0, '每个 qq_* MCP 工具都有工具开关映射', unmapped.join(', ') || '无遗漏');
 }
 
+console.log('## 白名单开关与好友 / 加群请求');
+for (const id of ['wlAllowAllGroups', 'wlAllowAllPrivate', 'section-requests', 'reqRefresh', 'reqMsg', 'reqList']) {
+  ok(ids.includes(id), `白名单/请求元素 ${id}`);
+}
+ok(/api\('\/api\/requests'/.test(html), '请求列表读取 /api/requests');
+ok(/api\('\/api\/requests\/decide'/.test(html), '请求处理走 /api/requests/decide');
+ok(/getElementById\('reqRefresh'\)\.addEventListener/.test(html), '请求刷新按钮已绑定');
+ok(/allowAll:[\s\S]{0,200}wlAllowAllGroups/.test(html), '保存白名单时提交 allowAll 开关');
+ok(/getElementById\('wlAllowAllGroups'\)\.checked = w\.allowAll/.test(html), '读取白名单时回填 allowAll 开关');
+
 console.log('## SnowLuma API 工具开关（可检索）');
 for (const id of ['v2ToolsSummary', 'v2ToolsJump', 'v2ToolsGroup', 'v2ToolSearch', 'v2ToolsCount']) {
   ok(ids.includes(id), `工具开关元素 ${id}`);

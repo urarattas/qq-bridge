@@ -73,6 +73,7 @@ const INITIAL_PROMPTS_FILE = path.join(STATE_DIR, 'initial-prompts.json');
 const STICKER_FILE = path.join(STATE_DIR, 'stickers.json');
 const FEEDBACK_FILE = path.join(STATE_DIR, 'feedback.json');
 const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
+const REQUEST_FILE = path.join(STATE_DIR, 'requests.json');
 const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
@@ -724,6 +725,12 @@ function loadConfig() {
     },
     // 私聊/群聊均未配置白名单时是否放行所有（true 时启动会打警告）
     allowAllWhenEmpty: file.allowAllWhenEmpty === true,
+    // 白名单总开关：开启后该类型不再看 allow 列表（deny 仍然优先）。
+    // 与 allowAllWhenEmpty 的区别：这个不要求白名单为空，是显式的「允许任何人」。
+    allowAll: {
+      groups: file.allowAll?.groups === true,
+      private: file.allowAll?.private === true
+    },
     ackMessage: file.ackMessage ?? '🤔 收到，正在思考…',
     sendDelayMs: file.sendDelayMs ?? 300,
     questionTimeoutMs: file.questionTimeoutMs ?? 5 * 60 * 1000,
@@ -1389,9 +1396,117 @@ function allowed(kind, id, cfg) {
   const s = String(id);
   const denyList = cfg.deny[kind] ?? cfg.deny[kind + 's'] ?? [];
   if (denyList.map(String).includes(s)) return false;
+  // 显式「允许任何人」：黑名单仍优先；closed-agent 的 owner-only 限制不经过这里。
+  // allowAll 的键用复数（groups / private），kind 是单数（group / private）。
+  if (cfg.allowAll?.[kind === 'group' ? 'groups' : kind] === true) return true;
   const allowList = cfg.allow[kind] ?? cfg.allow[kind + 's'] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty;
+}
+
+// ── 好友申请 / 加群请求（OneBot request 事件）───────────────────────────────
+//
+// `post_type: "request"` 不经过消息白名单：任何人都能向机器人发申请，所以这里
+// 只负责登记、写活动日志、私聊通知 owner；是否通过始终由管理员决定（控制台按钮
+// 或 /approve）。flag 是处理凭证，只留在 state/ 与桥接内存里，不下发给 AI 或页面。
+const REQUEST_MAX = 200;
+const requestStore = { seq: 0, items: [] };
+try {
+  const saved = readJsonSafe(REQUEST_FILE, null);
+  if (saved && typeof saved === 'object' && Array.isArray(saved.items)) {
+    requestStore.items = saved.items
+      .filter((x) => x && typeof x === 'object' && typeof x.flag === 'string' && x.flag && (x.kind === 'friend' || x.kind === 'group'))
+      .slice(-REQUEST_MAX);
+    requestStore.seq = Number.isSafeInteger(saved.seq)
+      ? saved.seq
+      : requestStore.items.reduce((max, x) => Math.max(max, Number(x.id) || 0), 0);
+  }
+} catch {}
+
+function saveRequests() {
+  try {
+    atomicWriteJson(REQUEST_FILE, { seq: requestStore.seq, items: requestStore.items });
+  } catch (error) {
+    log(`保存 state/requests.json 失败：${error?.message ?? error}`);
+  }
+}
+
+function requestKindLabel(kind) {
+  return kind === 'friend' ? '好友申请' : '加群请求';
+}
+
+function requestTargetText(entry) {
+  if (entry.kind === 'friend') return `QQ ${entry.userId ?? '未知'}`;
+  const group = entry.groupId ? `群 ${entry.groupId}` : '群（未知群号）';
+  const who = entry.subType === 'invite'
+    ? `邀请人 ${entry.userId ?? '未知'}`
+    : `申请人 ${entry.userId ?? '未知'}`;
+  return `${group} · ${who}`;
+}
+
+/** 对外的请求视图：刻意不含 flag（处理凭证）。 */
+function publicRequest(entry) {
+  return {
+    id: entry.id,
+    kind: entry.kind,
+    label: requestKindLabel(entry.kind),
+    userId: entry.userId ?? null,
+    groupId: entry.groupId ?? null,
+    subType: entry.subType ?? '',
+    comment: entry.comment ?? '',
+    time: entry.time,
+    status: entry.status,
+    decidedAt: entry.decidedAt ?? null,
+    decisionNote: entry.decisionNote ?? ''
+  };
+}
+
+function findRequest(ref) {
+  const s = String(ref ?? '').trim().replace(/^#/, '');
+  if (!s) return null;
+  const id = Number(s);
+  if (Number.isSafeInteger(id)) {
+    const byId = requestStore.items.find((x) => x.id === id);
+    if (byId) return byId;
+  }
+  return requestStore.items.find((x) => x.flag === s) ?? null;
+}
+
+/** 把一条 request 事件入库；同一 flag 重复投递（重连重放）只保留一条。 */
+function recordAddRequest(event) {
+  const kind = String(event?.request_type ?? '').trim();
+  if (kind !== 'friend' && kind !== 'group') return null;
+  const flag = String(event?.flag ?? '').trim();
+  if (!flag) return null;
+  const existing = requestStore.items.find((x) => x.flag === flag);
+  if (existing) return existing;
+  const num = (v) => (Number.isSafeInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const entry = {
+    id: ++requestStore.seq,
+    kind,
+    flag,
+    userId: num(event?.user_id),
+    groupId: num(event?.group_id),
+    invitedId: num(event?.invited_id),
+    subType: String(event?.sub_type ?? ''),
+    comment: truncateText(String(event?.comment ?? '').replace(/[\r\n]+/g, ' ').trim(), 200),
+    time: Date.now(),
+    status: 'pending',
+    notifiedAt: null,
+    decidedAt: null,
+    decisionNote: ''
+  };
+  requestStore.items.push(entry);
+  if (requestStore.items.length > REQUEST_MAX) requestStore.items.splice(0, requestStore.items.length - REQUEST_MAX);
+  saveRequests();
+  return entry;
+}
+
+function formatRequestNotice(entry) {
+  return `【${requestKindLabel(entry.kind)}】#${entry.id}\n${requestTargetText(entry)}`
+    + (entry.comment ? `\n留言：${entry.comment}` : '')
+    + `\n处理：/approve ${entry.id} 或 /reject ${entry.id} [理由]`
+    + '\n（也可在控制台「访问与安全 → 好友 / 加群请求」处理）';
 }
 
 // 二代会话 key 规范化：只接受 group:正整数 / private:正整数，并去掉前导零，避免同一会话出现多个别名。
@@ -2425,7 +2540,10 @@ async function main() {
     return parts.join('\n\n') + '\n\n' + promptText;
   }
 
-  if (!cfg.allow.private.length && !cfg.allow.groups.length && cfg.allowAllWhenEmpty) {
+  if (cfg.allowAll.groups || cfg.allowAll.private) {
+    const kinds = [cfg.allowAll.groups ? '群聊' : '', cfg.allowAll.private ? '私聊' : ''].filter(Boolean).join(' / ');
+    log(`⚠️  已开启「允许任何人对话」（${kinds}）：白名单列表不再生效（黑名单仍优先），任何 QQ 都能触发 AI；可在控制台「访问与安全」关闭`);
+  } else if (!cfg.allow.private.length && !cfg.allow.groups.length && cfg.allowAllWhenEmpty) {
     log('⚠️  白名单为空且 allowAllWhenEmpty=true：将转发所有私聊/群聊消息给 agent');
   } else if (!cfg.allow.private.length && !cfg.allow.groups.length) {
     // 否则这是一个「静默无响应」陷阱：消息全被丢弃，用户只看到 QQ 上毫无反应。
@@ -3594,6 +3712,8 @@ async function main() {
             ownerQQ: cfg.ownerQQ ?? null,
             allowGroups: cfg.allow?.groups ?? [],
             allowPrivate: cfg.allow?.private ?? [],
+            allowAll: { groups: cfg.allowAll?.groups === true, private: cfg.allowAll?.private === true },
+            pendingRequests: requestStore.items.filter((x) => x.status === 'pending').length,
             socialV2Paused: socialV2.paused,
             // 上游健康只给操作者看：它包含网关诊断信息（good/hint），
             // 属于管理侧观测，不该进 QQ 会话里那个受限的智能体视图。
@@ -4331,7 +4451,13 @@ async function main() {
         }
         // ── 白名单可视化编辑（写 config.json + 热更新内存） ───────────────────
         if (req.method === 'GET' && url.pathname === '/api/whitelist') {
-          sendJson({ allow: cfg.allow ?? { private: [], groups: [] }, deny: cfg.deny ?? { private: [], groups: [] }, ownerQQ: cfg.ownerQQ ?? null });
+          sendJson({
+            allow: cfg.allow ?? { private: [], groups: [] },
+            deny: cfg.deny ?? { private: [], groups: [] },
+            allowAll: { groups: cfg.allowAll?.groups === true, private: cfg.allowAll?.private === true },
+            allowAllWhenEmpty: cfg.allowAllWhenEmpty === true,
+            ownerQQ: cfg.ownerQQ ?? null
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/whitelist') {
@@ -4348,6 +4474,13 @@ async function main() {
             private: toNum(body.deny?.private) ?? (file.deny?.private ?? []),
             groups: toNum(body.deny?.groups) ?? (file.deny?.groups ?? [])
           };
+          // 允许任何人对话的总开关：只接受布尔值，未提交则保持当前值。
+          // 它不改变 ownerQQ，也不绕过 deny 黑名单与 closed-agent 的 owner-only 限制。
+          const boolOr = (value, fallback) => (typeof value === 'boolean' ? value : fallback);
+          const allowAll = {
+            groups: boolOr(body.allowAll?.groups, cfg.allowAll?.groups === true),
+            private: boolOr(body.allowAll?.private, cfg.allowAll?.private === true)
+          };
           // 管理员 QQ 可在控制台输入；空值=清除管理员（fail-closed），非法值拒绝写入。
           let ownerQQ = cfg.ownerQQ ?? null;
           if (body.ownerQQ !== undefined) {
@@ -4360,14 +4493,34 @@ async function main() {
           }
           file.allow = allow;
           file.deny = deny;
+          file.allowAll = allowAll;
           file.ownerQQ = ownerQQ;
           atomicWriteJson(configFile, file);
           cfg.allow = { private: allow.private, groups: allow.groups };
           cfg.deny = { private: deny.private, groups: deny.groups };
+          cfg.allowAll = allowAll;
           cfg.ownerQQ = ownerQQ;
           reconcileSessionPolicies();
-          log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，管理员: ${ownerQQ ?? '未设置'}）`);
-          sendJson({ ok: true, allow, deny, ownerQQ });
+          log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，允许所有群: ${allowAll.groups ? '开' : '关'}，允许所有私聊: ${allowAll.private ? '开' : '关'}，管理员: ${ownerQQ ?? '未设置'}）`);
+          sendJson({ ok: true, allow, deny, allowAll, ownerQQ });
+          return;
+        }
+
+        // ── 好友申请 / 加群请求（控制台读取与处理） ─────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/requests') {
+          sendJson({ ok: true, requests: requestStore.items.slice().reverse().map(publicRequest) });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/requests/decide') {
+          const body = await readBody();
+          const action = String(body.action ?? '');
+          if (action !== 'approve' && action !== 'reject') {
+            sendJson({ ok: false, error: 'action 必须是 approve 或 reject' }, 400);
+            return;
+          }
+          const result = await decideAddRequest(body.id, action === 'approve', body.reason);
+          const status = result.ok ? 200 : (String(result.error ?? '').includes('未找到') ? 404 : 400);
+          sendJson(result, status);
           return;
         }
 
@@ -10733,7 +10886,10 @@ async function main() {
       '/role [名字|off] — 切换人格；不带参数列出可用人格；off 清除',
       '/silent — 静默（群友消息不回复）',
       '/active — 退出静默',
-      '/reset（或 /new）— 重置当前会话上下文'
+      '/reset（或 /new）— 重置当前会话上下文',
+      '/requests — 查看待处理的好友 / 加群请求',
+      '/approve <序号> — 通过请求',
+      '/reject <序号> [理由] — 拒绝请求'
     ].join('\n');
 
     if (publicCommands.has(name)) {
@@ -10800,6 +10956,30 @@ async function main() {
     if (name === 'active' || name === 'speak') {
       writeRoleState(roleState.role, 'active');
       await sendToQQ(key, '已退出静默模式，恢复正常回复。');
+      return true;
+    }
+
+    if (name === 'requests' || name === 'reqs') {
+      const pendingList = requestStore.items.filter((x) => x.status === 'pending').slice(-10);
+      if (!pendingList.length) {
+        await sendToQQ(key, '当前没有待处理的好友 / 加群请求。');
+        return true;
+      }
+      await sendToQQ(key, pendingList.map((x) => `#${x.id} ${requestKindLabel(x.kind)} · ${requestTargetText(x)}${x.comment ? ' · ' + x.comment : ''}`).join('\n')
+        + '\n通过：/approve 序号；拒绝：/reject 序号 [理由]');
+      return true;
+    }
+
+    if (name === 'approve' || name === 'reject') {
+      if (!arg) {
+        await sendToQQ(key, `用法：/${name} <序号>${name === 'reject' ? ' [理由]' : ''}`);
+        return true;
+      }
+      const [ref, ...reasonParts] = arg.split(/\s+/);
+      const result = await decideAddRequest(ref, name === 'approve', reasonParts.join(' '));
+      await sendToQQ(key, result.ok
+        ? `✅ ${requestKindLabel(result.request?.kind)} #${result.request?.id} 已${name === 'approve' ? '通过' : '拒绝'}`
+        : `❌ ${result.error || '处理失败'}`);
       return true;
     }
 
@@ -11603,6 +11783,68 @@ async function main() {
     try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
   });
 
+  // 好友申请 / 加群请求：登记 + 活动日志 + 私聊通知 owner。
+  // 是否通过由管理员决定（控制台或 /approve），AI 侧拿不到 flag。
+  let requestSubscribed = false;
+  async function handleRequestEvent(event) {
+    try {
+      const entry = recordAddRequest(event);
+      if (!entry) return;
+      if (entry.notifiedAt) return; // 重复投递（重连重放）不重复通知
+      appendActivity(`[request] ${requestKindLabel(entry.kind)} #${entry.id} ${requestTargetText(entry)}${entry.comment ? ' · ' + entry.comment.slice(0, 60) : ''}`);
+      log(`${requestKindLabel(entry.kind)} #${entry.id}：${requestTargetText(entry)}（等待管理员处理）`);
+      if (cfg.ownerQQ) {
+        try {
+          await withTimeout(bot.sendPrivateMessage(cfg.ownerQQ, formatRequestNotice(entry)), 10000, '通知管理员请求');
+          entry.notifiedAt = Date.now();
+          saveRequests();
+        } catch (error) {
+          log(`通知管理员请求失败：${error?.message ?? error}`);
+        }
+      }
+    } catch (error) {
+      log('处理好友/加群请求事件出错:', error?.message ?? error);
+    }
+  }
+  try {
+    bot.onRequest(handleRequestEvent);
+    requestSubscribed = true;
+  } catch (error) {
+    log(`（request 事件订阅不可用（SnowLuma SDK 较旧？），改走 raw 事件旁路：${error?.message ?? error}）`);
+  }
+
+  /** 管理员处理请求：approve=true 通过，否则拒绝。返回值会直接回给控制台。 */
+  async function decideAddRequest(ref, approve, reason = '') {
+    const entry = findRequest(ref);
+    if (!entry) return { ok: false, error: '未找到该请求（可能已处理，或桥接重启后凭证已失效）' };
+    if (entry.status !== 'pending') return { ok: false, error: `该请求已处理（${entry.status}）`, request: publicRequest(entry) };
+    const action = entry.kind === 'friend' ? 'set_friend_add_request' : 'set_group_add_request';
+    const params = { flag: entry.flag, approve: approve === true };
+    if (entry.kind === 'group') {
+      if (entry.subType) params.sub_type = entry.subType;
+      if (!approve && reason) params.reason = truncateText(String(reason), 200);
+    }
+    let res;
+    try {
+      res = await bot.request(action, params);
+    } catch (error) {
+      entry.status = 'failed';
+      entry.decidedAt = Date.now();
+      entry.decisionNote = `调用失败：${error?.message ?? error}`;
+      saveRequests();
+      return { ok: false, error: entry.decisionNote, request: publicRequest(entry) };
+    }
+    const ok = res?.status === 'ok' || res?.retcode === 0 || res?.ok === true;
+    entry.status = ok ? (approve ? 'approved' : 'rejected') : 'failed';
+    entry.decidedAt = Date.now();
+    entry.decisionNote = ok
+      ? (reason ? truncateText(String(reason), 200) : '')
+      : `网关返回：${res?.wording || res?.message || res?.status || '未知错误'}`;
+    saveRequests();
+    log(`${requestKindLabel(entry.kind)} #${entry.id} 已${approve ? '通过' : '拒绝'}${ok ? '' : '（网关调用失败）'}`);
+    return { ok, request: publicRequest(entry), response: res };
+  }
+
   // ── 上游健康：任何事件包都算「SnowLuma 还活着」，心跳还额外带接收链路健康度 ──
   // 用 onEvent 挂一个**旁路**订阅（不影响主链路）：
   //   · 任意事件包 → 记账（证明 SnowLuma 进程 + WS 链路还在）；
@@ -11617,6 +11859,8 @@ async function main() {
       noteUpstreamPacket(post
         ? `${post}${event.notice_type ? `/${event.notice_type}` : ''}${event.meta_event_type ? `/${event.meta_event_type}` : ''}${event.message_type ? `/${event.message_type}` : ''}`
         : 'event');
+      // onRequest 不可用时，用原始事件旁路兜底（recordAddRequest 按 flag 去重）。
+      if (post === 'request' && !requestSubscribed) void handleRequestEvent(event);
       if (post === 'meta_event' && event?.meta_event_type === 'heartbeat') {
         // status 未在 SDK 类型里声明（OneBotMetaEvent 只声明 meta_event_type），
         // 但 OneBotBaseEvent 是 JsonObject，读取合法。

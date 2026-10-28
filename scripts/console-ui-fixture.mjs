@@ -301,7 +301,12 @@ export function makeFixtureState() {
     dshEffort: 'max',
     dshProvider: 'deepseek-official',
     dshModel: 'deepseek-flash',
-    whitelist: { allow: { groups: [123456789, 100003], private: [100001] }, deny: { groups: [], private: [] }, ownerQQ: '100001' },
+    whitelist: { allow: { groups: [123456789, 100003], private: [100001] }, deny: { groups: [], private: [] }, allowAll: { groups: false, private: false }, ownerQQ: '100001' },
+    // 好友 / 加群请求（离线示例，flag 永远不下发给页面）。
+    requests: [
+      { id: 1, kind: 'friend', label: '好友申请', userId: 200001, groupId: null, subType: '', comment: '离线演示：想加个好友', time: timestamp, status: 'pending', decidedAt: null, decisionNote: '' },
+      { id: 2, kind: 'group', label: '加群请求', userId: 200002, groupId: 123456789, subType: 'add', comment: '', time: timestamp, status: 'approved', decidedAt: timestamp, decisionNote: '' },
+    ],
     sessions: [
       { key: 'group:123456789', sessionId: 'demo-community-20260920', owner: false },
       { key: 'group:100003', sessionId: 'demo-development-20260920', owner: false },
@@ -465,6 +470,7 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             globalSideEffect: true,
           });
           case '/api/whitelist': return json(state.whitelist);
+          case '/api/requests': return json({ ok: true, requests: state.requests });
           case '/api/sessions': return json({ sessions: state.sessions });
           case '/api/pending': return json({ pending: [{ key: 'group:123456789', kind: 'approval', toolName: '演示工具', reason: '等待管理员确认（离线示例）' }] });
           case '/api/socialV2/config': return json({ ok: true, config: state.v2 });
@@ -572,7 +578,15 @@ export async function startConsoleFixture({ port = 0, original = false, htmlPath
             return json({ ok: true, provider: body.provider, model: body.model, reasoningEffort: state.dshEffort, verified: true });
           case '/api/dsh/effort': state.dshEffort = body.reasoningEffort; return json({ ok: true, reasoningEffort: body.reasoningEffort });
           case '/api/role-mode': state.roleMode = body.mode; return json({ ok: true });
-          case '/api/whitelist': state.whitelist = body; return json({ ok: true });
+          case '/api/whitelist': state.whitelist = body; return json({ ok: true, ...body });
+          case '/api/requests/decide': {
+            const entry = state.requests.find((x) => x.id === Number(body.id));
+            if (!entry) return json({ ok: false, error: '未找到该请求' }, 404);
+            entry.status = body.action === 'approve' ? 'approved' : 'rejected';
+            entry.decidedAt = Date.now();
+            entry.decisionNote = body.reason || '';
+            return json({ ok: true, request: entry });
+          }
           case '/api/connection': {
             const dsh = body.dsh ?? {};
             const sl = body.snowluma ?? {};

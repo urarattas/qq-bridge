@@ -139,9 +139,31 @@ try {
 
   await test('Whitelist numeric parsing and security contracts', async () => {
     for (const [id, value] of Object.entries({ wlGroups: '123456789，100003', wlPrivate: '100001 100002', dnGroups: '800001,800002', dnPrivate: '900001', ownerQQ: '100001' })) await fill(id, value);
-    assert.deepEqual(await clickWrite('#wlSave', '/api/whitelist'), { allow: { private: [100001, 100002], groups: [123456789, 100003] }, deny: { private: [900001], groups: [800001, 800002] }, ownerQQ: '100001' });
+    await check('wlAllowAllGroups', true);
+    assert.deepEqual(await clickWrite('#wlSave', '/api/whitelist'), {
+      allow: { private: [100001, 100002], groups: [123456789, 100003] },
+      deny: { private: [900001], groups: [800001, 800002] },
+      allowAll: { groups: true, private: false },
+      ownerQQ: '100001'
+    });
     await check('secInterceptNotify', false);
     assert.deepEqual(await clickWrite('#secSave', '/api/security'), { interceptNotify: false });
+  });
+
+  await test('Friend / group request card renders and approves through the console', async () => {
+    await navigate('access');
+    await page.waitForFunction(() => document.querySelectorAll('#reqList tbody tr, #reqList tr').length >= 2);
+    const row = await page.evaluate(() => {
+      const tr = [...document.querySelectorAll('#reqList tr')].find((x) => x.textContent.includes('好友申请'));
+      return tr?.textContent ?? '';
+    });
+    assert.match(row, /待处理/, '待处理请求应显示状态');
+    const [response] = await Promise.all([
+      page.waitForResponse((r) => new URL(r.url()).pathname === '/api/requests/decide' && r.request().method() === 'POST'),
+      page.locator('#reqList button', { hasText: '通过' }).first().click(),
+    ]);
+    assert.equal(response.status(), 200);
+    assert.equal((await response.json()).ok, true);
   });
 
   // state/ 的 ACL 收紧需要管理员权限，未提权时桥接会明确报告 hardened:false。

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 
 let failures = 0;
 async function test(name, run) {
@@ -60,6 +62,64 @@ await test('本地 /help 不投递 DSH，指令与回复都不进入二代消息
   const st = h.getSocialV2State('group:456');
   assert.equal(st.unread.length, 0, '指令不能进入二代未读');
   assert.equal(st.recentMessages.length, 0, '指令不能进入二代最近消息');
+});
+await test('允许任何人开关按类型放行，黑名单优先且不改管理员', async (h) => {
+  h.setMode('reserved2');
+  assert.equal(h.modeAllowed('group:999', 'group', 999, h.cfg, 'reserved2'), false, '默认仍按白名单拦截');
+  h.cfg.allowAll = { groups: true, private: false };
+  assert.equal(h.modeAllowed('group:999', 'group', 999, h.cfg, 'reserved2'), true, '开启后任意群放行');
+  assert.equal(h.modeAllowed('private:999', 'private', 999, h.cfg, 'reserved2'), false, '未开启的类型不受影响');
+  h.cfg.allowAll = { groups: true, private: true };
+  assert.equal(h.modeAllowed('private:999', 'private', 999, h.cfg, 'reserved2'), true, '开启后任意私聊放行');
+  h.cfg.deny.groups.push('999');
+  assert.equal(h.modeAllowed('group:999', 'group', 999, h.cfg, 'reserved2'), false, '黑名单必须优先于 allowAll');
+  assert.equal(h.cfg.ownerQQ, 123, 'allowAll 不得改动 ownerQQ');
+  // 封闭 Agent 仍只允许管理员私聊
+  assert.equal(h.modeAllowed('private:999', 'private', 999, h.cfg, 'closed-agent'), false, 'closed-agent 不受 allowAll 影响');
+});
+await test('好友/加群请求入库、私聊通知管理员，并可由管理员处理', async (h) => {
+  h.setMode('reserved2');
+  const friend = { post_type: 'request', request_type: 'friend', flag: 'flag-friend-1', user_id: 200001, comment: '你好' };
+  await h.handleRequestEvent(friend);
+  const entry = h.requestStore.items.find((x) => x.flag === 'flag-friend-1');
+  assert.ok(entry, '好友申请必须入库');
+  assert.equal(entry.status, 'pending');
+  assert.ok(h.calls.sent.some((m) => m.kind === 'private' && String(m.text).includes('好友申请')), '应私聊通知管理员');
+  const notified = h.calls.sent.length;
+  await h.handleRequestEvent(friend);
+  assert.equal(h.calls.sent.length, notified, '同一 flag 重复投递不得重复通知');
+  const res = await h.decideAddRequest(entry.id, true);
+  assert.equal(res.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.requests.at(-1))), { action: 'set_friend_add_request', params: { flag: 'flag-friend-1', approve: true } });
+  assert.equal(entry.status, 'approved');
+  assert.equal((await h.decideAddRequest(entry.id, false)).ok, false, '已处理的请求不能再处理');
+
+  const group = { post_type: 'request', request_type: 'group', flag: 'flag-group-1', group_id: 456, user_id: 777, sub_type: 'invite', comment: '' };
+  await h.handleRequestEvent(group);
+  const ge = h.requestStore.items.find((x) => x.flag === 'flag-group-1');
+  await h.decideAddRequest(ge.id, false, '不认识');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls.requests.at(-1))), {
+    action: 'set_group_add_request',
+    params: { flag: 'flag-group-1', approve: false, sub_type: 'invite', reason: '不认识' }
+  });
+  assert.equal(ge.status, 'rejected');
+});
+await test('管理员可用 /requests 与 /approve 处理好友请求', async (h) => {
+  h.setMode('reserved2');
+  await h.handleRequestEvent({ post_type: 'request', request_type: 'friend', flag: 'flag-cmd-1', user_id: 200003, comment: '指令测试' });
+  const entry = h.requestStore.items.find((x) => x.flag === 'flag-cmd-1');
+  const say = (text) => h.handleIncoming('private', 123, {
+    self_id: 999, user_id: 123, message_id: 3001,
+    sender: { user_id: 123, nickname: '管理员' },
+    message: [{ type: 'text', data: { text } }]
+  }, h.cfg);
+  await say('/requests');
+  assert.ok(h.calls.sent.some((m) => String(m.text).includes(`#${entry.id}`) && String(m.text).includes('好友申请')), '/requests 应列出待处理请求');
+  await say(`/approve ${entry.id}`);
+  assert.equal(entry.status, 'approved');
+  assert.ok(h.calls.sent.some((m) => String(m.text).includes('已通过')), '/approve 应回复结果');
+  await say('/requests');
+  assert.ok(h.calls.sent.some((m) => String(m.text).includes('没有待处理')), '处理完应显示无待处理');
 });
 await test('群友 /status 被本地拒绝，管理员 /status 本地回复且不投递 DSH', async (h) => {
   h.setMode('reserved2');
@@ -481,6 +541,7 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
       ['GET', '/api/preset/sim-prompt/backups'], ['POST', '/api/preset/sim-prompt/restore'],
       ['GET', '/api/dsh/model'], ['POST', '/api/dsh/effort'],
       ['GET', '/api/whitelist'], ['POST', '/api/whitelist'], ['POST', '/api/restart'],
+      ['GET', '/api/requests'], ['POST', '/api/requests/decide'],
       ['POST', '/api/console/token'], ['GET', '/api/role'], ['POST', '/api/role'],
       ['GET', '/api/connection'], ['GET', '/api/connection/secret?name=dsh'], ['POST', '/api/connection'],
     ];
@@ -501,6 +562,60 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     assert.equal(adminOk.status, 200, '管理员应能访问 /api/dsh/model');
     console.log('PASS agent token cannot reach persona/prompt/effort/whitelist admin endpoints');
   } catch (error) { failures++; console.error('FAIL agent token admin isolation:', error.message); }
+  finally { await new Promise((resolve) => server.close(resolve)); await h.close(); }
+}
+// ── 白名单 allowAll 开关与好友/加群请求控制台端点 ──────────────────────────
+{
+  const h = await bridgeHarness();
+  const server = h.startConsoleServer();
+  try {
+    if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
+    const port = server.address().port;
+    const call = (path, method = 'GET', body) => new Promise((resolve, reject) => {
+      const request = http.request(
+        { host: '127.0.0.1', port, path, method, headers: { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token' } },
+        (response) => {
+          let data = '';
+          response.on('data', (chunk) => { data += chunk; });
+          response.on('end', () => resolve({ status: response.statusCode, body: data ? JSON.parse(data) : null }));
+        },
+      );
+      request.on('error', reject);
+      request.setTimeout(3000, () => request.destroy(new Error('request hung')));
+      request.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+
+    const before = await call('/api/whitelist');
+    assert.equal(before.status, 200);
+    assert.deepEqual(before.body.allowAll, { groups: false, private: false });
+    const saved = await call('/api/whitelist', 'POST', {
+      allow: { private: [123], groups: [456] },
+      deny: { private: [], groups: [] },
+      allowAll: { groups: true, private: false }
+    });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.body.allowAll, { groups: true, private: false });
+    assert.equal(saved.body.ownerQQ, 123, '未提交 ownerQQ 时管理员必须保持不变');
+    assert.equal(h.cfg.ownerQQ, 123, 'allowAll 不得改动管理员');
+    assert.deepEqual(JSON.parse(JSON.stringify(h.cfg.allowAll)), { groups: true, private: false });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(h.temp, 'config.json'), 'utf8'));
+    assert.deepEqual(onDisk.allowAll, { groups: true, private: false }, 'allowAll 必须写入 config.json');
+
+    const empty = await call('/api/requests');
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.body.requests, []);
+    await h.handleRequestEvent({ post_type: 'request', request_type: 'friend', flag: 'flag-http-1', user_id: 200009, comment: 'HTTP 测试' });
+    const listed = await call('/api/requests');
+    assert.equal(listed.body.requests.length, 1);
+    assert.equal(listed.body.requests[0].status, 'pending');
+    assert.equal(Object.hasOwn(listed.body.requests[0], 'flag'), false, '请求列表不得下处理凭证 flag');
+    const decided = await call('/api/requests/decide', 'POST', { id: listed.body.requests[0].id, action: 'approve' });
+    assert.equal(decided.status, 200);
+    assert.equal(decided.body.request.status, 'approved');
+    const invalid = await call('/api/requests/decide', 'POST', { id: 1, action: 'maybe' });
+    assert.equal(invalid.status, 400);
+    console.log('PASS allowAll whitelist switches and request console endpoints');
+  } catch (error) { failures++; console.error('FAIL whitelist allowAll / request endpoints:', error.message); }
   finally { await new Promise((resolve) => server.close(resolve)); await h.close(); }
 }
 // ── 控制台入口的传输层防护：Host 头 + 令牌定长比较 + /api/authorize/read 鉴权 ──

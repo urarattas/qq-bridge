@@ -90,7 +90,8 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 - **交互增强**：
   - agent 通过 `ask_user_question` 提问时，问题会转发到 QQ，回复即自动应答
   - agent 请求工具审批时，转发到 QQ，回复「通过」/「拒绝」即可决策
-  - 支持 DSH 斜杠命令（如 `/compact`）与桥接本地指令：`/help`（所有人）、`/status` / `/mode` / `/model` / `/role` / `/silent` / `/active` / `/reset`（仅管理员）。**本地指令及其回复都不投递 DSH，也不进入二代未读/最近消息，AI 看不到**
+  - 支持 DSH 斜杠命令（如 `/compact`）与桥接本地指令：`/help`（所有人）、`/status` / `/mode` / `/model` / `/role` / `/silent` / `/active` / `/reset` / `/requests` / `/approve <序号>` / `/reject <序号> [理由]`（仅管理员）。**本地指令及其回复都不投递 DSH，也不进入二代未读/最近消息，AI 看不到**
+  - **好友申请 / 加群请求**：订阅 OneBot `request` 事件（好友申请、入群申请、群邀请），登记到 `state/requests.json` 并私聊通知管理员；控制台「访问与安全 → 好友 / 加群请求」可一键通过/拒绝，管理员也可用 `/approve` / `/reject` 处理。处理动作调用 `set_friend_add_request` / `set_group_add_request`，处理凭证 flag 不会下发给 AI 或页面
   - 群聊引用/回复会解析成「被引用人 + 原文」注入 DSH（如 `[引用 Derp：El Psy Kongroo是啥]机关的走狗`），让 AI 判断这句话是对谁说的，不会把群友之间引用第三方的对话误当成指向自己；引用机器人自己时会被视为必回
   - **图片/表情（含动图 GIF）**：表情包优先走 QQ 的 CDN 直链，`get_image` 失败时用 `emoji_id` 推出 CDN 地址兜底；媒体元数据保留 `emoji_id`/`summary`/`sub_type` 等字段。下载走同一套 SSRF 防护传输，并修掉了「DNS 先返回 IPv6、本机没有 IPv6 出口 → 每次白等 20 秒」的根因（改为 **IPv4 优先 + 逐地址故障切换**），动图表情不再时好时坏。单条消息上限默认 8MB / 64MP / 5 张（`socialV2.media`）
   - MCP 发送工具支持可选 `replyToMessageId`，并新增专用 `qq_reply` 工具：AI 可以先用 `qq_get_group_history` 拿到真实消息 id，再引用/回复某条消息（是否允许 AI 主动使用由人格/策略决定；桥接会检测发送类工具调用并自动跳过该回合的重复自动转发）
@@ -138,7 +139,9 @@ npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk �
 | `webSearch.baseURL` / `model` / `maxUses` / `maxResults` | 搜索端点（默认 `https://api.deepseek.com/anthropic/v1`，必须 https 且解析到公网）、模型（默认 `deepseek-v4-flash`）、单次搜索最多用几次工具、返回条数上限 |
 | `workspaceTitle` | QQ 会话在 DSH 界面中的归组名称，默认「QQ 聊天」 |
 | `allow.private` / `allow.groups` | 白名单（QQ 号/群号数组）；留空且 `allowAllWhenEmpty: true` 时放行全部 |
-| `deny.*` | 黑名单，优先于白名单 |
+| `allowAll.groups` / `allowAll.private` | 「允许任何人对话」开关（控制台「访问与安全」可勾选）：开启后对应类型不再看 `allow` 列表，任何群/私聊都能触发 AI；黑名单仍优先，`ownerQQ` 与 closed-agent 的 owner-only 限制不受影响 |
+| `deny.*` | 黑名单，优先于白名单和 `allowAll` |
+| `requests` | 好友申请 / 入群申请（OneBot `request` 事件）会入库并私聊通知 `ownerQQ`；控制台「访问与安全 → 好友 / 加群请求」或管理员 `/requests`、`/approve <序号>`、`/reject <序号> [理由]` 处理 |
 | `ackMessage` | 消息投递后的立即回复，空字符串关闭 |
 | `sendDelayMs` | QQ 连续发送间隔，防止触发频率限制 |
 | `consolePort` | 本地控制台端口，默认 `3100` |

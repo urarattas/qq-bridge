@@ -10,7 +10,7 @@
 
 | 模式 | 允许通道 | agent preset | 用途 |
 | --- | --- | --- | --- |
-| `chat` | 白名单群 + 白名单私聊 | qq-chat（安全聊天） | 日常聊天 |
+| `chat` | 白名单群 + 白名单私聊（或控制台开启 `allowAll.groups` / `allowAll.private` 允许任何人） | qq-chat（安全聊天） | 日常聊天 |
 | `closed-agent` | **仅** 私聊 ownerQQ | DSH 默认 preset（通常 `standard`，完整工具） | 你在 QQ 私聊里操控 DSH |
 | `reserved2`（二代仿真，运行 `setup-dsh.mjs` 后默认） | 暂同 chat | qq-chat-v2 | 文本不自动转发，AI 通过工具自主看消息/发言/等待/设置唤醒与潜水 |
 
@@ -44,7 +44,7 @@
 
 | 主体 | 通道 | 权限 |
 | --- | --- | --- |
-| **管理员（ownerQQ，控制台或 DSH 设置页可配置）** | QQ 群/私聊 | 正常聊天 + **管理命令由桥接硬执行**（不经过模型）：`/role <角色名>` 切人格、`/role off` 清除、`/silent` 静默、`/active` 恢复、`/reset`、`/status`；消息自动带【管理员】标记 |
+| **管理员（ownerQQ，控制台或 DSH 设置页可配置）** | QQ 群/私聊 | 正常聊天 + **管理命令由桥接硬执行**（不经过模型）：`/role <角色名>` 切人格、`/role off` 清除、`/silent` 静默、`/active` 恢复、`/reset`、`/status`、`/requests`、`/approve <序号>`、`/reject <序号> [理由]`；消息自动带【管理员】标记 |
 | **群友** | QQ 群 | **仅正常聊天**。控制词、`/` 管理命令被桥接拦截；静默模式下消息不投递给 agent |
 | **管理员** | **桥接控制台**（`http://127.0.0.1:3100`） | **最高权限**：控制模式（控制台顶部模式按钮）、控制角色/静默（写 `state/current-role.json`）、完整 DSH 工具（含本地操作）、查看 QQ 活动日志（`state/qq-activity.log`）、直接打开「QQ 聊天」工作区会话对话 |
 | **QQ 会话 agent（chat 模式）** | — | 最低权限面（见下） |
@@ -57,6 +57,7 @@
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
+   - ⚠️ `allowAll.groups` / `allowAll.private`（控制台白名单页的两个开关）会让对应类型的**准入与发送目标检查**都放行任意 QQ（`deny` 黑名单仍优先）。它不改变 `ownerQQ`，也不放开 closed-agent 的 owner-only 限制；开启后任何 QQ 都能触发 AI，属于明确的降级选择。
    - **语音额外收紧**：`qq_send_voice` 只能发**语音库**（`socialV2.voice.dir`，默认 `qq-bridge/audio/`）里的文件，不能发任意本地路径、URL 或 base64（防 prompt injection 拿本机文件当语音外发）；另有独立的时长/体积/频率上限（`socialV2.voice.*`），额度与文本发送分开计数。详见 [docs/guides/VOICE.md](docs/guides/VOICE.md)。
 5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
 6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
@@ -104,9 +105,14 @@
 /silent           # 静默模式（群友消息不回复）
 /active           # 恢复正常
 /reset            # 重置当前 QQ 会话上下文
+/requests         # 列出待处理的好友申请 / 加群请求
+/approve 3        # 通过 #3 请求
+/reject 3 不认识  # 拒绝 #3 请求（可选理由）
 ```
 
 > 以上指令由桥接本地处理：**指令原文不会投递 DSH，指令回复也不会写入二代未读/最近消息**，因此 AI 在正常上下文中看不到它们。`/help` 对所有人生效，其余指令仅管理员（ownerQQ）可用。管理员未注册的 `/xxx` 仍会交给 DSH 自己的斜杠命令（例如 DSH 内的 `/compact`）。
+>
+> **好友 / 加群请求**（OneBot `request` 事件）不经过消息白名单：到达后登记到 `state/requests.json`，写活动日志并私聊通知 ownerQQ。控制台「访问与安全 → 好友 / 加群请求」可一键通过/拒绝；处理凭证 `flag` 只留在桥接内存/state 文件里，不会下发给 AI 或控制台页面。
 
 **途径 B：DSH WebUI**：
 - 在 GUI 会话里对我说「给 QQ 机器人设置角色：傲娇助手」/「清除角色」/「开启静默模式」，我写 `state/current-role.json`

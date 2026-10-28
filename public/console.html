@@ -2467,6 +2467,13 @@ button:active:not(:disabled) {
     </section>
 <section id="section-whitelist" data-page="access" class="card span-all">
       <h2>白名单 / 管理员</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label style="flex:1">允许所有群聊（不看群号白名单）</label><input type="checkbox" id="wlAllowAllGroups" style="width:auto">
+      </div>
+      <div class="row" style="margin-bottom:8px">
+        <label style="flex:1">允许所有私聊（任何 QQ 都能私聊 AI）</label><input type="checkbox" id="wlAllowAllPrivate" style="width:auto">
+      </div>
+      <div class="meta" style="margin-bottom:10px">⚠️ 这两个开关打开后，对应类型的白名单列表不再生效（黑名单仍优先）；AI 会和任何人对话。管理员（ownerQQ）与封闭 Agent 的 owner-only 限制不受影响，也不需要修改管理员。</div>
       <label>允许的群号（逗号分隔）</label>
       <input type="text" id="wlGroups" placeholder="123456789, 123456">
       <label>允许的私聊 QQ（逗号分隔）</label>
@@ -2482,6 +2489,15 @@ button:active:not(:disabled) {
         <button id="wlSave">保存白名单</button>
         <span class="meta">保存后立即生效并写入 config.json</span>
       </div>
+    </section>
+<section id="section-requests" data-page="access" class="card span-all">
+      <h2>好友 / 加群请求</h2>
+      <div class="meta">SnowLuma 推送的 <code>request</code> 事件（好友申请、入群申请、群邀请）。通过/拒绝会调用 <code>set_friend_add_request</code> / <code>set_group_add_request</code>；请求同时会私聊通知管理员，管理员也可用 <code>/approve 序号</code> / <code>/reject 序号</code> 处理。</div>
+      <div class="row" style="margin-top:10px">
+        <button id="reqRefresh" class="small">刷新请求</button>
+        <span class="meta" id="reqMsg"></span>
+      </div>
+      <div id="reqList"><div class="meta">加载中…</div></div>
     </section>
 <section id="section-silent" data-page="overview" class="card">
       <h2>静默开关</h2>
@@ -3243,10 +3259,99 @@ async function refreshWhitelist() {
     const w = await api('/api/whitelist');
     document.getElementById('wlGroups').value = (w.allow.groups || []).join(', ');
     document.getElementById('wlPrivate').value = (w.allow.private || []).join(', ');
+    document.getElementById('wlAllowAllGroups').checked = w.allowAll?.groups === true;
+    document.getElementById('wlAllowAllPrivate').checked = w.allowAll?.private === true;
     document.getElementById('ownerQQ').value = w.ownerQQ != null ? String(w.ownerQQ) : '';
     document.getElementById('dnGroups').value = (w.deny.groups || []).join(', ');
     document.getElementById('dnPrivate').value = (w.deny.private || []).join(', ');
   } catch {}
+}
+
+function fmtRequestTime(ts) {
+  const n = typeof ts === 'number' ? ts : Date.parse(String(ts ?? ''));
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return new Date(n).toLocaleString();
+}
+
+function requestStatusLabel(status) {
+  return ({ pending: '待处理', approved: '已通过', rejected: '已拒绝', failed: '失败' })[status] || status || '-';
+}
+
+async function refreshRequests() {
+  const box = document.getElementById('reqList');
+  const msg = document.getElementById('reqMsg');
+  if (!box) return;
+  try {
+    const r = await api('/api/requests');
+    const list = Array.isArray(r.requests) ? r.requests : [];
+    msg.textContent = '';
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-state"><strong>暂无请求</strong><p>好友申请 / 入群申请到达后会显示在这里，并私聊通知管理员。</p></div>';
+      return;
+    }
+    const table = document.createElement('table');
+    const head = document.createElement('tr');
+    for (const text of ['时间', '类型', '对象', '留言', '状态', '操作']) {
+      const th = document.createElement('th');
+      th.textContent = text;
+      head.appendChild(th);
+    }
+    table.appendChild(head);
+    for (const item of list) {
+      const tr = document.createElement('tr');
+      const cells = [
+        fmtRequestTime(item.time),
+        item.label || item.kind,
+        item.kind === 'friend' ? `QQ ${item.userId ?? '未知'}` : `群 ${item.groupId ?? '未知'} · ${item.subType === 'invite' ? '邀请' : '申请'}人 ${item.userId ?? '未知'}`,
+        item.comment || '',
+        requestStatusLabel(item.status) + (item.decisionNote ? `（${item.decisionNote}）` : '')
+      ];
+      for (const value of cells) {
+        const td = document.createElement('td');
+        td.textContent = String(value);
+        tr.appendChild(td);
+      }
+      const actions = document.createElement('td');
+      if (item.status === 'pending') {
+        for (const [label, action, cls] of [['通过', 'approve', 'small'], ['拒绝', 'reject', 'small danger']]) {
+          const btn = document.createElement('button');
+          btn.className = cls;
+          btn.textContent = label;
+          btn.addEventListener('click', async () => {
+            let reason = '';
+            if (action === 'reject') {
+              const answer = prompt('拒绝理由（可留空）：', '');
+              if (answer === null) return;
+              reason = answer;
+            }
+            btn.disabled = true;
+            let text = '';
+            let ok = false;
+            try {
+              const res = await api('/api/requests/decide', 'POST', { id: item.id, action, reason });
+              ok = res.ok === true;
+              text = ok ? `✅ #${item.id} 已处理` : `❌ ${res.error || '处理失败'}`;
+            } catch (error) {
+              text = '❌ ' + (error?.message ?? error);
+            }
+            await refreshRequests();
+            msg.textContent = text;
+            msg.className = ok ? 'meta ok' : 'meta err';
+            refresh();
+          });
+          actions.appendChild(btn);
+        }
+      } else {
+        actions.textContent = '-';
+      }
+      tr.appendChild(actions);
+      table.appendChild(tr);
+    }
+    box.replaceChildren(table);
+  } catch (error) {
+    msg.textContent = '读取请求失败：' + (error?.message ?? error);
+    msg.className = 'meta err';
+  }
 }
 
 async function refreshSessions() {
@@ -3443,11 +3548,20 @@ document.getElementById('wlSave').addEventListener('click', async () => {
   const r = await api('/api/whitelist', 'POST', {
     allow: { private: parse(document.getElementById('wlPrivate').value), groups: parse(document.getElementById('wlGroups').value) },
     deny: { private: parse(document.getElementById('dnPrivate').value), groups: parse(document.getElementById('dnGroups').value) },
+    allowAll: {
+      groups: document.getElementById('wlAllowAllGroups').checked,
+      private: document.getElementById('wlAllowAllPrivate').checked
+    },
     ownerQQ: document.getElementById('ownerQQ').value.trim()
   });
-  if (r.ok) { refreshWhitelist(); refresh(); alert('白名单已保存并生效'); }
-  else alert(r.error || '保存失败');
+  if (r.ok) {
+    refreshWhitelist();
+    refresh();
+    const all = [r.allowAll?.groups ? '所有群聊' : '', r.allowAll?.private ? '所有私聊' : ''].filter(Boolean);
+    alert(all.length ? `白名单已保存并生效：已允许${all.join(' / ')}` : '白名单已保存并生效');
+  } else alert(r.error || '保存失败');
 });
+document.getElementById('reqRefresh').addEventListener('click', refreshRequests);
 document.getElementById('tsSend').addEventListener('click', async () => {
   const r = await api('/api/test-send', 'POST', {
     kind: document.getElementById('tsKind').value,
@@ -4797,6 +4911,9 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   if (page === 'access' && typeof loadConnectionConfig === 'function') {
     loadConnectionConfig();
   }
+  if (page === 'access' && typeof refreshRequests === 'function') {
+    refreshRequests();
+  }
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -5382,7 +5499,7 @@ document.getElementById('usageClear').addEventListener('click', async () => {
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refresh(); refreshRoles(); refreshWhitelist(); refreshRequests(); refreshSessions(); refreshPending(); refreshPresets(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

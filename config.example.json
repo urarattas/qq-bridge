@@ -39,6 +39,10 @@
     "private": [],
     "groups": []
   },
+  "allowAll": {
+    "groups": false,
+    "private": false
+  },
   "allowAllWhenEmpty": false,
   "ackMessage": "",
   "sendDelayMs": 300,
